@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.company.automation</groupId>
+    <artifactId>referenced-automation-sap</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>Referenced Automation SAP Framework</name>
+    <description>
+        Enterprise reference SAP automation framework covering BOTH automation
+        styles in one repo: SAP Fiori/UI5 via Playwright (reusing
+        referenced-automation-ui's browser/context lifecycle, base page object,
+        reporting and logging directly) and classic SAP GUI Scripting via JACOB
+        (Java-COM Bridge, Windows-only). Cucumber + Java + Maven, published to
+        Nexus and imported as a Maven dependency like any other library.
+    </description>
+    <url>https://github.com/achaljoshi/referenced-automation-sap</url>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+
+        <!-- ===== Version properties (bump here, nowhere else) ===== -->
+        <ui.version>1.0.0-SNAPSHOT</ui.version>
+        <utils.version>1.0.0-SNAPSHOT</utils.version>
+        <jacob.version>1.18</jacob.version>
+
+        <!-- Must match referenced-automation-ui's own aspectj.version - a dependency's
+             <properties> are NOT inherited by consumers, so this is redeclared here
+             purely to build the -javaagent path below. -->
+        <aspectj.version>1.9.25.1</aspectj.version>
+
+        <maven.surefire.version>3.5.6</maven.surefire.version>
+        <maven.compiler.plugin.version>3.15.0</maven.compiler.plugin.version>
+        <maven.source.plugin.version>3.3.1</maven.source.plugin.version>
+        <maven.jar.plugin.version>3.4.2</maven.jar.plugin.version>
+        <maven.resources.plugin.version>3.3.1</maven.resources.plugin.version>
+        <maven.deploy.plugin.version>3.1.4</maven.deploy.plugin.version>
+        <versions.plugin.version>2.18.0</versions.plugin.version>
+        <exec.plugin.version>3.6.3</exec.plugin.version>
+
+        <!-- Overridable at runtime: mvn test -Dbrowser=chromium -Denv=qa -Dheadless=true -->
+        <browser>chromium</browser>
+        <env>qa</env>
+        <headless>true</headless>
+        <!-- Excludes @gui by default - classic SAP GUI Scripting needs a Windows machine
+             with SAP GUI Desktop + JACOB's native DLL, which CI does not have. See README
+             "Classic SAP GUI Scripting setup" and "CI/CD" for how to run @gui locally/manually. -->
+        <cucumber.filter.tags>not @gui</cucumber.filter.tags>
+
+        <argLine>
+            -javaagent:"${settings.localRepository}/org/aspectj/aspectjweaver/${aspectj.version}/aspectjweaver-${aspectj.version}.jar"
+        </argLine>
+    </properties>
+
+    <!-- ===================================================================
+         src/main/java is the framework core that ships in the published jar.
+         src/test/java is a self-contained demo suite: @fiori scenarios run
+         against a public SAPUI5 demo app (no real SAP backend needed);
+         @gui scenarios are a reference implementation of classic SAP GUI
+         Scripting and require a real Windows + SAP GUI + backend to execute
+         - NOT shipped when other teams import this as a Maven dependency.
+         =================================================================== -->
+    <dependencies>
+
+        <!-- Fiori/UI5 side: reuse referenced-automation-ui's Playwright browser/context
+             lifecycle, BasePage, WaitUtils, ScreenshotUtils, ConfigReader, Hooks-building-blocks,
+             StepLoggerPlugin, Extent+Allure reporting and Log4j2 config wholesale - see README
+             "Why this repo depends on referenced-automation-ui" for the rationale. -->
+        <dependency>
+            <groupId>com.company.automation</groupId>
+            <artifactId>referenced-automation-ui</artifactId>
+            <version>${ui.version}</version>
+        </dependency>
+
+        <!-- Shared commons - test data, JSON/YAML, crypto, generic config loading -->
+        <dependency>
+            <groupId>com.company.automation</groupId>
+            <artifactId>referenced-automation-utils</artifactId>
+            <version>${utils.version}</version>
+        </dependency>
+
+        <!-- Classic SAP GUI Scripting: Java-COM Bridge (Windows-only at runtime; this jar's
+             classes compile and package fine on any OS, they simply cannot execute a @gui
+             scenario without a Windows machine + SAP GUI + JACOB's native DLL - see README). -->
+        <dependency>
+            <groupId>com.hynnet</groupId>
+            <artifactId>jacob</artifactId>
+            <version>${jacob.version}</version>
+        </dependency>
+
+        <!-- cucumber-java/cucumber-junit-platform-engine/cucumber-picocontainer, junit-jupiter,
+             junit-platform-suite/launcher, extentreports-cucumber7-adapter, allure-cucumber7-jvm,
+             aspectjweaver, slf4j-api, log4j-core/log4j-slf4j2-impl, jackson-databind, commons-io
+             all come transitively from referenced-automation-ui - intentionally not redeclared. -->
+    </dependencies>
+
+    <build>
+        <finalName>${project.artifactId}</finalName>
+        <testResources>
+            <testResource>
+                <directory>src/test/resources</directory>
+            </testResource>
+        </testResources>
+
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>${maven.compiler.plugin.version}</version>
+                <configuration>
+                    <release>17</release>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>${maven.resources.plugin.version}</version>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${maven.surefire.version}</version>
+                <configuration>
+                    <argLine>${argLine}</argLine>
+                    <includes>
+                        <include>**/Run*.java</include>
+                    </includes>
+                    <systemPropertyVariables>
+                        <browser>${browser}</browser>
+                        <env>${env}</env>
+                        <headless>${headless}</headless>
+                        <cucumber.filter.tags>${cucumber.filter.tags}</cucumber.filter.tags>
+                    </systemPropertyVariables>
+                    <testFailureIgnore>true</testFailureIgnore>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>${maven.source.plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>${maven.jar.plugin.version}</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-deploy-plugin</artifactId>
+                <version>${maven.deploy.plugin.version}</version>
+            </plugin>
+
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>versions-maven-plugin</artifactId>
+                <version>${versions.plugin.version}</version>
+            </plugin>
+
+            <!-- Same as referenced-automation-ui - installs Playwright's browser binaries,
+                 needed only for @fiori scenarios. Not bound to any lifecycle phase. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>${exec.plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>install-playwright-browsers</id>
+                        <configuration>
+                            <mainClass>com.microsoft.playwright.CLI</mainClass>
+                            <arguments>
+                                <argument>install</argument>
+                                <argument>--with-deps</argument>
+                                <argument>chromium</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <distributionManagement>
+        <repository>
+            <id>nexus-releases</id>
+            <name>Nexus Releases Repository</name>
+            <url>${env.NEXUS_RELEASE_URL}</url>
+        </repository>
+        <snapshotRepository>
+            <id>nexus-snapshots</id>
+            <name>Nexus Snapshots Repository</name>
+            <url>${env.NEXUS_SNAPSHOT_URL}</url>
+        </snapshotRepository>
+    </distributionManagement>
+
+    <profiles>
+        <profile>
+            <id>report-allure</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>io.qameta.allure</groupId>
+                        <artifactId>allure-maven</artifactId>
+                        <version>2.13.0</version>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+</project>
