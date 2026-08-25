@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><title>FioriPage helper fixture</title></head>
+<body>
+  <!-- Mimics UI5's real id convention: an auto-generated view/component
+       path prefix, then "--", then the developer-assigned logical id. -->
+  <button id="__component0---mainView--addToCartBtn">Add to cart</button>
+
+  <div id="busy-overlay" class="sapUiLocalBusyIndicator" style="display:none;">Loading...</div>
+
+  <script>
+    document.getElementById('__component0---mainView--addToCartBtn').addEventListener('click', () => {
+      const overlay = document.getElementById('busy-overlay');
+      overlay.style.display = 'block';
+      setTimeout(() => { overlay.style.display = 'none'; }, 300);
+    });
+  </script>
+</body>
+</html>
