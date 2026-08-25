@@ -1,10 +1,9 @@
-import type { Locator } from '@playwright/test';
-import { BasePage } from '@automation/referenced-automation-ui';
+import type { Locator, Page } from '@playwright/test';
 
 /**
- * Base class for SAP Fiori/UI5 page objects. Extends referenced-automation-ui's
- * BasePage directly (same Playwright Page, same logged actions) and adds the
- * two things generic web automation doesn't need for a UI5 app:
+ * SAP Fiori/UI5 helpers on top of referenced-automation-ui's `actions`
+ * (same Playwright Page, same logged actions). These are the two things
+ * generic web automation doesn't need for a UI5 app:
  *
  * 1. `byControlId` - UI5 renders a control's DOM id as the auto-generated
  *    view/component id path PLUS the developer-assigned logical id you gave
@@ -24,18 +23,15 @@ import { BasePage } from '@automation/referenced-automation-ui';
  * they're more resilient than either technique here. byControlId exists for
  * the custom/compound controls that don't expose one.
  */
-export abstract class FioriPage extends BasePage {
-  /** Locates an element whose id ends with the UI5 control's logical id. */
-  byControlId(logicalId: string): Locator {
-    return this.page.locator(`[id$="${logicalId}"]`);
-  }
+export function byControlId(page: Page, logicalId: string): Locator {
+  return page.locator(`[id$="${logicalId}"]`);
+}
 
-  async waitForUI5Ready(timeoutMs = 30_000): Promise<void> {
-    await this.page
-      .locator('.sapUiLocalBusyIndicator, .sapMBusyIndicator, .sapUiBlockLayer')
-      .first()
-      .waitFor({ state: 'hidden', timeout: timeoutMs })
-      .catch(() => undefined); // fine if none ever appeared
-    await this.page.waitForLoadState('networkidle');
-  }
+export async function waitForUI5Ready(page: Page, timeoutMs = 30_000): Promise<void> {
+  await page
+    .locator('.sapUiLocalBusyIndicator, .sapMBusyIndicator, .sapUiBlockLayer')
+    .first()
+    .waitFor({ state: 'hidden', timeout: timeoutMs })
+    .catch(() => undefined); // fine if none ever appeared
+  await page.waitForLoadState('networkidle');
 }

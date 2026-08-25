@@ -1,7 +1,7 @@
 {
   "name": "@automation/referenced-automation-sap",
   "version": "1.0.0",
-  "description": "SAP Fiori/UI5 automation on Playwright, reusing referenced-automation-ui's BasePage wholesale. Adds the two things generic web automation doesn't need: locating UI5 controls by their stable logical ID (UI5 prefixes the rendered DOM id with the view's auto-generated path) and waiting for UI5's busy indicator to clear.",
+  "description": "SAP Fiori/UI5 automation on Playwright, reusing referenced-automation-ui's actions wholesale. Adds the two things generic web automation doesn't need: locating UI5 controls by their stable logical ID (UI5 prefixes the rendered DOM id with the view's auto-generated path) and waiting for UI5's busy indicator to clear.",
   "license": "UNLICENSED",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

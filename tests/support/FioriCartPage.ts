@@ -1,11 +1,13 @@
 import type { Page } from '@playwright/test';
-import { FioriPage } from '../../src/pages/FioriPage';
+import { actions } from '@automation/referenced-automation-ui';
+import { waitForUI5Ready } from '../../src/pages/fioriHelpers';
 
 /**
  * Page object for SAP's own public "Shopping Cart" SAPUI5 demo kit app
  * (https://ui5.sap.com/test-resources/sap/m/demokit/cart/webapp/index.html)
  * - a credential-free, officially SAP-hosted demo, used here purely as a
- * real UI5 app to prove FioriPage against (not a random third-party site).
+ * real UI5 app to prove the fiori helpers against (not a random third-party
+ * site).
  *
  * Every selector below was confirmed against a live render of this exact
  * app before being written, not guessed from SAPUI5 documentation:
@@ -18,42 +20,49 @@ import { FioriPage } from '../../src/pages/FioriPage';
  *   a real, observed inconsistency in the app, not a copy-paste mismatch
  *   here.
  */
-export class FioriCartPage extends FioriPage {
-  private readonly promotedItemsHeader = this.page.getByText('Promoted Items', { exact: true });
-  private readonly addToCartButtons = this.page.locator('[aria-label="Add to Shopping Cart"]');
-  private readonly showCartButton = this.page.locator('[aria-label="Show Shopping Cart"]');
-  private readonly cartPanelTitle = this.page.locator('.sapMTitle', { hasText: /^Shopping Cart$/ });
-  private readonly cartTotal = this.page.getByText(/^Total:/);
+export interface FioriCartPage {
+  open(url: string): Promise<void>;
+  isLoaded(): Promise<boolean>;
+  expandPromotedItems(): Promise<void>;
+  addFirstPromotedItemToCart(): Promise<void>;
+  openCart(): Promise<void>;
+  cartTotalText(): Promise<string>;
+}
 
-  constructor(page: Page) {
-    super(page);
-  }
+export function createFioriCartPage(page: Page): FioriCartPage {
+  const promotedItemsHeader = page.getByText('Promoted Items', { exact: true });
+  const addToCartButtons = page.locator('[aria-label="Add to Shopping Cart"]');
+  const showCartButton = page.locator('[aria-label="Show Shopping Cart"]');
+  const cartPanelTitle = page.locator('.sapMTitle', { hasText: /^Shopping Cart$/ });
+  const cartTotal = page.getByText(/^Total:/);
 
-  async open(url: string): Promise<void> {
-    await this.goto(url);
-    await this.waitForUI5Ready();
-  }
+  return {
+    async open(url) {
+      await actions.goto(page, url);
+      await waitForUI5Ready(page);
+    },
 
-  async isLoaded(): Promise<boolean> {
-    return (await this.title()) === 'Shopping Cart';
-  }
+    async isLoaded() {
+      return (await actions.title(page)) === 'Shopping Cart';
+    },
 
-  async expandPromotedItems(): Promise<void> {
-    await this.click(this.promotedItemsHeader);
-    await this.waitForVisible(this.addToCartButtons.first());
-  }
+    async expandPromotedItems() {
+      await actions.click(promotedItemsHeader);
+      await actions.waitForVisible(addToCartButtons.first());
+    },
 
-  async addFirstPromotedItemToCart(): Promise<void> {
-    await this.click(this.addToCartButtons.first());
-    await this.waitForUI5Ready();
-  }
+    async addFirstPromotedItemToCart() {
+      await actions.click(addToCartButtons.first());
+      await waitForUI5Ready(page);
+    },
 
-  async openCart(): Promise<void> {
-    await this.click(this.showCartButton);
-    await this.waitForVisible(this.cartPanelTitle);
-  }
+    async openCart() {
+      await actions.click(showCartButton);
+      await actions.waitForVisible(cartPanelTitle);
+    },
 
-  async cartTotalText(): Promise<string> {
-    return this.getText(this.cartTotal);
-  }
+    async cartTotalText() {
+      return actions.getText(cartTotal);
+    },
+  };
 }

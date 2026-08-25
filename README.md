@@ -1,28 +1,28 @@
 # referenced-automation-sap
 
-SAP Fiori/UI5 automation on Playwright, reusing [`referenced-automation-ui`](../referenced-automation-ui)'s `BasePage` wholesale - same `Page`, same logged actions, same everything. This repo adds exactly two things generic web automation doesn't need for a UI5 app.
+SAP Fiori/UI5 automation on Playwright, reusing [`referenced-automation-ui`](../referenced-automation-ui)'s `actions` wholesale - same `Page`, same logged actions, same everything. This repo adds exactly two standalone functions generic web automation doesn't need for a UI5 app.
 
 > Classic SAP GUI Scripting (JACOB/COM, Windows-only) is out of scope here by design - see the note at the bottom for why.
 
-## `FioriPage`
+## Fiori helpers
 
 ```ts
-import { FioriPage } from '@automation/referenced-automation-sap';
+import { actions } from '@automation/referenced-automation-ui';
+import { byControlId, waitForUI5Ready } from '@automation/referenced-automation-sap';
+import type { Page } from '@playwright/test';
 
-class MyFioriPage extends FioriPage {
-  async clickAddToCart() {
-    await this.click(this.byControlId('addToCartBtn'));
-    await this.waitForUI5Ready();
-  }
+async function clickAddToCart(page: Page) {
+  await actions.click(byControlId(page, 'addToCartBtn'));
+  await waitForUI5Ready(page);
 }
 ```
 
-| Method | Why UI5 needs it |
+| Function | Why UI5 needs it |
 |---|---|
-| `byControlId(logicalId)` | UI5 renders a control's DOM id as an auto-generated view/component path **plus** the developer-assigned logical id you gave it in the view - e.g. a button with `id="addToCartBtn"` inside a view UI5 auto-names `container-cart---welcomeView` renders as `id="container-cart---welcomeView--addToCartBtn"`. Matching the logical id as a suffix (`[id$="addToCartBtn"]`) survives that auto-generated prefix changing between app reloads/versions, which a full/exact id match never would. |
-| `waitForUI5Ready()` | UI5 shows a busy indicator while fetching data/re-rendering; interacting before it clears is a common source of flaky UI5 test automation. Waits for every busy-indicator element to disappear, then for network idle. |
+| `byControlId(page, logicalId)` | UI5 renders a control's DOM id as an auto-generated view/component path **plus** the developer-assigned logical id you gave it in the view - e.g. a button with `id="addToCartBtn"` inside a view UI5 auto-names `container-cart---welcomeView` renders as `id="container-cart---welcomeView--addToCartBtn"`. Matching the logical id as a suffix (`[id$="addToCartBtn"]`) survives that auto-generated prefix changing between app reloads/versions, which a full/exact id match never would. |
+| `waitForUI5Ready(page)` | UI5 shows a busy indicator while fetching data/re-rendering; interacting before it clears is a common source of flaky UI5 test automation. Waits for every busy-indicator element to disappear, then for network idle. |
 
-Where a control has a proper ARIA role/label - most standard `sap.m` controls do - prefer Playwright's own `page.getByRole()`/`getByLabel()` over `byControlId`; they're more resilient. `byControlId` is for the custom/compound controls that don't expose one. `tests/support/FioriCartPage.ts` shows both used side by side against a real app.
+Where a control has a proper ARIA role/label - most standard `sap.m` controls do - prefer Playwright's own `page.getByRole()`/`getByLabel()` over `byControlId`; they're more resilient. `byControlId` is for the custom/compound controls that don't expose one. `tests/support/FioriCartPage.ts` shows both used side by side against a real app, composed into a page object factory function the same way `referenced-automation-ui`'s own page objects are - see that repo's README for the pattern.
 
 ## Quick start
 

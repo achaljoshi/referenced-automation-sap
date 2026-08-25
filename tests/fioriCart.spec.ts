@@ -1,5 +1,5 @@
 import { test, expect } from '@automation/referenced-automation-ui';
-import { FioriCartPage } from './support/FioriCartPage';
+import { createFioriCartPage } from './support/FioriCartPage';
 
 const CART_APP_URL = 'https://ui5.sap.com/test-resources/sap/m/demokit/cart/webapp/index.html';
 
@@ -8,7 +8,7 @@ const CART_APP_URL = 'https://ui5.sap.com/test-resources/sap/m/demokit/cart/weba
 // confirmed against a live render before being written.
 test.describe('SAPUI5 Shopping Cart demo @regression', () => {
   test('adding a promoted item updates the cart total', async ({ page }) => {
-    const cart = new FioriCartPage(page);
+    const cart = createFioriCartPage(page);
     await cart.open(CART_APP_URL);
     expect(await cart.isLoaded()).toBe(true);
 
