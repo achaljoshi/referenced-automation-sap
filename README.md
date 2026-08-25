@@ -31,6 +31,8 @@ Where a control has a proper ARIA role/label - most standard `sap.m` controls do
 npm test
 ```
 
+`setup.sh`/`setup.bat` work from a completely fresh clone of the whole repo family, in any order: this repo depends on `referenced-automation-utils` and `referenced-automation-ui`, so setup builds whichever of their tarballs don't already exist in `../shared-packages` automatically, from `../referenced-automation-utils` and `../referenced-automation-ui` in that order (cloning nothing on its own - those sibling repos must already be checked out next to this one).
+
 ## Verifying this repo's own tests
 
 Two things are tested, deliberately kept separate:
