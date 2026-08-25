@@ -23,7 +23,14 @@ export default defineConfig({
   // ordinary network jitter the same way it would for any external site.
   retries: process.env.CI ? 2 : 0,
   timeout: 60_000,
-  reporter: [['list'], ['html', { open: 'never' }]],
+  reporter: [
+    ['list'],
+    ['html', { open: 'never' }],
+    // Raw results only - generating the viewable HTML report is a separate
+    // step (`npm run allure:report`) since it needs a JRE on PATH, unlike
+    // collecting results here which is pure JS/TS.
+    ['allure-playwright', { resultsDir: 'allure-results' }],
+  ],
   use: {
     baseURL: env.getOptional('BASE_URL'),
     headless,

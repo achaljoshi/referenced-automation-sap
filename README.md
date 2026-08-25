@@ -44,6 +44,15 @@ Two things are tested, deliberately kept separate:
 
 Same `.env.<name>` + `ENV=<name>` pattern as the rest of this family (see `referenced-automation-utils`'s README). `playwright.config.ts` reads `BASE_URL`/`HEADLESS` from the active env file.
 
+## Allure reporting
+
+Every test run writes raw results to `allure-results/` via the `allure-playwright` reporter (pure JS/TS, no extra runtime needed). Turning those into the viewable HTML report needs a JRE on `PATH` (Allure's report generator is a Java tool) - that's why it's a separate step, not part of `npm test` itself:
+
+```bash
+npm test               # also writes allure-results/
+npm run allure:report  # generates allure-report/ and opens it in a browser
+```
+
 ## Distributing this package
 
 ```bash
