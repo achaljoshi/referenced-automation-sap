@@ -44,9 +44,16 @@ echo ""
 echo "== Installing dependencies =========================================="
 npm ci
 
-echo ""
-echo "== Installing Playwright browsers ===================================="
-npx playwright install --with-deps chromium
+if [ "${PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD:-}" = "1" ]; then
+  echo ""
+  echo "== Skipping Playwright browser download (PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1) =="
+  echo "Set BROWSER to a system-installed browser channel instead, e.g.:"
+  echo "  BROWSER=msedge npm test   (or BROWSER=chrome)"
+else
+  echo ""
+  echo "== Installing Playwright browsers ===================================="
+  npx playwright install --with-deps chromium
+fi
 
 echo ""
 echo "Setup complete. Try: npm test"

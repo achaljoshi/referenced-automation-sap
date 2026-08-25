@@ -26,10 +26,17 @@ echo == Installing dependencies ==========================================
 call npm ci
 if errorlevel 1 exit /b 1
 
-echo.
-echo == Installing Playwright browsers ====================================
-call npx playwright install --with-deps chromium
-if errorlevel 1 exit /b 1
+if "%PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD%"=="1" (
+  echo.
+  echo == Skipping Playwright browser download ^(PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1^) ==
+  echo Set BROWSER to a system-installed browser channel instead, e.g.:
+  echo   set BROWSER=msedge ^&^& npm test   ^(or BROWSER=chrome^)
+) else (
+  echo.
+  echo == Installing Playwright browsers ====================================
+  call npx playwright install --with-deps chromium
+  if errorlevel 1 exit /b 1
+)
 
 echo.
 echo Setup complete. Try: npm test
