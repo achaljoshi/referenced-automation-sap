@@ -1,0 +1,168 @@
+# ============================================================================
+# GitLab CI pipeline for referenced-automation-sap.
+#
+# Triggers on: any push to main (including a merge request being merged),
+# every merge request, and manual "Run pipeline" from the GitLab UI - see
+# the `workflow:` block below.
+#
+# ---- Restricted-network setup: read this before your first run ----
+#
+# `mcr.microsoft.com` and the public npm registry are not reachable from
+# this network - every image and package this pipeline needs has to come
+# from your org's JFrog Artifactory instead. Two CI/CD variables make that
+# work (Settings > CI/CD > Variables in this project, or set at group
+# level so every repo in the family shares them):
+#
+#   NPM_REGISTRY_URL            Your Artifactory npm registry URL (the same
+#                                one already configured in your local
+#                                ~/.npmrc / npm config - this pipeline never
+#                                hardcodes it, just reads it from the
+#                                variable). If unset, `npm ci` falls back to
+#                                npm's normal default registry, which will
+#                                fail here - so this one is effectively
+#                                required.
+#   PLAYWRIGHT_DOWNLOAD_HOST     Optional. Only set this if your Artifactory
+#                                also mirrors Playwright's browser-binary
+#                                CDN (a "generic remote repository" pointed
+#                                at playwright.azureedge.net, in Artifactory
+#                                terms). Leave unset to let Playwright try
+#                                its real CDN directly - some networks allow
+#                                that one host through even when general
+#                                internet access is blocked.
+#
+# `image:` below is the Playwright Docker image mirrored into this org's
+# JFrog Artifactory - confirmed reachable, unlike mcr.microsoft.com. It's
+# used only as a Node.js + Ubuntu Jammy base with the OS-level libraries
+# browsers need already installed - NOT as the source of the browser
+# itself. The version baked into that image (v1.47.0) does not have to
+# match this repo's own @playwright/test version (kept at whatever
+# package.json already pins, unchanged for CI's sake) - the `test` job
+# below runs `npx playwright install chromium` itself, after `npm ci`, to
+# fetch a browser binary that actually matches whatever version npm just
+# installed - see referenced-automation-ui's .gitlab-ci.yml for the full
+# reasoning behind this (repeated in every repo's pipeline so each one is
+# self-contained). `--with-deps` is deliberately NOT used, since it also
+# apt-get installs OS packages, needing its own network path.
+#
+# ---- Live external test excluded from the main pipeline ----
+#
+# tests/fioriCart.spec.ts (@regression) drives a real, live SAP-hosted demo
+# app (ui5.sap.com) - useful locally to prove byControlId/waitForUI5Ready
+# against a real UI5 app, but not something this pipeline can guarantee is
+# reachable on a locked-down corporate network. The main `test` job below
+# only runs test:smoke (tests/fioriPage.spec.ts, a local fixture, no
+# external network needed). A separate `regression` job runs the live-demo
+# test with `allow_failure: true`, so a genuine regression is still visible
+# without blocking the pipeline on a network path outside this repo's
+# control.
+#
+# ---- Cross-repo dependency note ----
+#
+# This repo depends on referenced-automation-utils and
+# referenced-automation-ui, not yet published to a registry - see
+# referenced-automation-utils' README for why. The `build` stage below
+# clones both fresh (utils first - ui's own build needs it already
+# packaged) and packages them with their own scripts/create-package.sh,
+# the exact same scripts a developer runs locally, so CI and local setup
+# never diverge.
+#
+# This assumes both sibling repos live in the same GitLab group/namespace
+# as this repo and are reachable with this job's own CI_JOB_TOKEN. If your
+# org's GitLab layout differs, override UTILS_REPO_URL/UI_REPO_URL as
+# CI/CD variables instead of editing this file.
+# ============================================================================
+
+image: csg-cst-docker-local.artifactory.alm.corp.hmrc.gov.uk:443/common/microsoft/playwright:v1.47.0-jammy
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+
+stages:
+  - build
+  - test
+  - report
+
+variables:
+  UTILS_REPO_URL: "${CI_SERVER_URL}/${CI_PROJECT_NAMESPACE}/referenced-automation-utils.git"
+  UI_REPO_URL: "${CI_SERVER_URL}/${CI_PROJECT_NAMESPACE}/referenced-automation-ui.git"
+  npm_config_cache: "${CI_PROJECT_DIR}/.npm-cache"
+
+cache:
+  key: "${CI_COMMIT_REF_SLUG}-npm"
+  paths:
+    - .npm-cache/
+
+before_script:
+  - if [ -n "${NPM_REGISTRY_URL:-}" ]; then npm config set registry "$NPM_REGISTRY_URL"; fi
+  - if [ -n "${PLAYWRIGHT_DOWNLOAD_HOST:-}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST; fi
+
+.package_dependencies: &package_dependencies
+  - SHARED_PACKAGES_DIR="$(realpath "${CI_PROJECT_DIR}/../shared-packages")"
+  - mkdir -p "$SHARED_PACKAGES_DIR"
+  - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${UTILS_REPO_URL#https://}" /tmp/referenced-automation-utils
+  - bash /tmp/referenced-automation-utils/scripts/create-package.sh "$SHARED_PACKAGES_DIR"
+  - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${UI_REPO_URL#https://}" /tmp/referenced-automation-ui
+  - bash /tmp/referenced-automation-ui/scripts/create-package.sh "$SHARED_PACKAGES_DIR"
+
+build:
+  stage: build
+  script:
+    - *package_dependencies
+    - npm ci
+    - npm run build
+    - npm run lint
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 hour
+
+test:
+  stage: test
+  needs: ["build"]
+  script:
+    - *package_dependencies
+    - npm ci
+    - npx playwright install chromium
+    - npm run test:smoke
+  artifacts:
+    when: always
+    paths:
+      - test-results/
+      - playwright-report/
+      - allure-results/
+      - logs/
+    reports:
+      junit: test-results/junit.xml
+    expire_in: 30 days
+
+regression:
+  stage: test
+  needs: ["build"]
+  allow_failure: true
+  script:
+    - *package_dependencies
+    - npm ci
+    - npx playwright install chromium
+    - npm run test:regression
+  artifacts:
+    when: always
+    paths:
+      - test-results/
+      - allure-results/
+    expire_in: 30 days
+
+pages:
+  stage: report
+  needs: ["test", "regression"]
+  script:
+    - npm install -g allure-commandline --silent
+    - allure generate allure-results --clean -o public
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
