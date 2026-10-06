@@ -72,6 +72,8 @@ SAP GUI's built-in **Script Recording and Playback** writes a VBScript of what y
  recording.vbs --sap-vbs-to-playwright--> recording.spec.ts --playwright test--> SapGuiSession --PowerShell/COM--> SAP GUI
 ```
 
+> The full guide - how it works, configuration, troubleshooting table, CI, limits - is in [`docs/SAP_GUI_GUIDE.md`](docs/SAP_GUI_GUIDE.md).
+
 ### Getting started with SAP GUI (first time, from zero)
 
 **What library opens SAP GUI? None you need to install or learn.** SAP GUI itself has a built-in automation interface (SAP GUI Scripting, a Windows COM API - the same thing the old Java framework drove through JACOB). This repo talks to it through a small PowerShell bridge that ships inside it, and Playwright is only the *test runner* (reporting, retries, parallelism, `expect`). You write plain TypeScript with a `sap` object.
