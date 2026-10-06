@@ -1,7 +1,7 @@
 {
   "name": "@automation/referenced-automation-sap",
   "version": "1.0.0",
-  "description": "SAP Fiori/UI5 automation on Playwright, reusing referenced-automation-ui's actions wholesale. Adds the two things generic web automation doesn't need: locating UI5 controls by their stable logical ID (UI5 prefixes the rendered DOM id with the view's auto-generated path) and waiting for UI5's busy indicator to clear.",
+  "description": "SAP automation on Playwright: Fiori/UI5 helpers (byControlId, waitForUI5Ready) and a classic SAP GUI framework - a Windows COM bridge with built-in waiting, plus a converter that turns SAP GUI Scripting recordings (VBScript) into Playwright tests.",
   "license": "UNLICENSED",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,6 +21,7 @@
     "build": "tsc -p tsconfig.build.json",
     "clean": "rimraf dist *.tgz",
     "lint": "eslint . --ext .ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "playwright test",
     "test:smoke": "playwright test --grep @smoke",
     "test:regression": "playwright test --grep @regression",
@@ -29,27 +30,36 @@
     "install:browsers": "playwright install --with-deps chromium",
     "allure:generate": "allure generate allure-results --clean -o allure-report",
     "allure:open": "allure open allure-report",
-    "allure:report": "npm run allure:generate && npm run allure:open"
-  },
-  "dependencies": {
-    "@automation/referenced-automation-ui": "file:../shared-packages/automation-referenced-automation-ui-1.0.0.tgz",
-    "@automation/referenced-automation-utils": "file:../shared-packages/automation-referenced-automation-utils-1.0.0.tgz"
+    "allure:report": "npm run allure:generate && npm run allure:open",
+    "convert": "node dist/cli/convertVbs.js recordings --out tests/sapgui",
+    "test:framework": "playwright test tests/gui",
+    "test:sapgui": "playwright test tests/sapgui --grep @sapgui",
+    "doctor": "node dist/cli/doctor.js"
   },
   "peerDependencies": {
-    "@playwright/test": ">=1.40.0"
+    "@playwright/test": ">=1.62.1 <2.0.0"
   },
   "overrides": {
     "uuid": "^11.1.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.1",
+    "@playwright/test": "^1.62.1",
     "@types/node": "^22.10.5",
     "@typescript-eslint/eslint-plugin": "^8.19.1",
     "@typescript-eslint/parser": "^8.19.1",
     "allure-commandline": "^2.32.0",
     "allure-playwright": "^3.0.9",
     "eslint": "^8.57.1",
+    "playwright-core": "^1.62.1",
     "rimraf": "^6.0.1",
     "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@automation/referenced-automation-ui": "file:../shared-packages/automation-referenced-automation-ui-1.0.0.tgz",
+    "@automation/referenced-automation-utils": "file:../shared-packages/automation-referenced-automation-utils-1.0.0.tgz"
+  },
+  "bin": {
+    "sap-vbs-to-playwright": "./dist/cli/convertVbs.js",
+    "sap-gui-doctor": "./dist/cli/doctor.js"
   }
 }

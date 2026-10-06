@@ -128,6 +128,9 @@ test:
     - npm ci
     - npx playwright install chromium
     - npm run test:smoke
+    # The SAP GUI framework (VBScript converter, session waiting) against the
+    # in-memory simulator - needs no SAP and no Windows, so it runs here.
+    - npm run test:framework
   artifacts:
     when: always
     paths:
@@ -153,6 +156,45 @@ regression:
     paths:
       - test-results/
       - allure-results/
+    expire_in: 30 days
+
+# ---- Real SAP GUI recordings (manual, Windows runner only) ----
+#
+# Converted recordings in tests/sapgui drive the real SAP GUI client over COM,
+# so they can only run on a Windows machine that has SAP GUI installed and a
+# logged-on session (see README > "Setting up a Windows machine"). Nothing
+# else in this pipeline can do that, so this job is manual and may fail
+# without blocking.
+#
+# NOT VERIFIED: this repo's author has no access to such a runner. Before
+# relying on this job, (1) replace the placeholder tag below with your Windows
+# runner's tag, (2) check the shell commands match that runner's shell
+# (PowerShell on a default Windows runner), (3) set SAP_USER / SAP_PASSWORD /
+# SAP_CLIENT as masked CI variables, (4) run `npm run doctor` there first, and
+# (5) make sure ../shared-packages holds the utils and ui tarballs before
+# `npm ci` - the Linux jobs build them with the bash snippet above
+# (*package_dependencies), which a PowerShell runner cannot run as written.
+# `before_script` is cleared (it is Linux/sh) and the Docker `image` above is
+# ignored by a Windows *shell* executor, which is what this job assumes.
+sapgui:
+  stage: test
+  needs: ["build"]
+  when: manual
+  allow_failure: true
+  tags:
+    - sap-gui-windows   # PLACEHOLDER - rename to your Windows runner's tag
+  before_script: []
+  script:
+    - npm ci
+    - npm run build
+    - npm run doctor
+    - npm run test:sapgui
+  artifacts:
+    when: always
+    paths:
+      - test-results/
+      - allure-results/
+      - logs/
     expire_in: 30 days
 
 pages:

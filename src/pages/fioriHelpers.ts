@@ -27,11 +27,33 @@ export function byControlId(page: Page, logicalId: string): Locator {
   return page.locator(`[id$="${logicalId}"]`);
 }
 
+/**
+ * Waits until the UI5 app has finished what it is doing, without a fixed
+ * sleep and without 'networkidle' (which never settles on an app that
+ * polls, and returns too early on one that hasn't started its requests yet).
+ *
+ * Ready means both: no busy indicator is showing, and UI5's own renderer
+ * reports nothing left to render (`sap.ui.getCore().getUIDirty()` is false).
+ * On a page that isn't a UI5 app at all there is nothing to wait for, so it
+ * returns immediately.
+ *
+ * You rarely need this directly: Playwright actions and assertions already
+ * wait for the element they act on. It's for "the whole screen has settled"
+ * moments - after opening the app, or after a step that re-renders widely.
+ */
 export async function waitForUI5Ready(page: Page, timeoutMs = 30_000): Promise<void> {
   await page
     .locator('.sapUiLocalBusyIndicator, .sapMBusyIndicator, .sapUiBlockLayer')
     .first()
     .waitFor({ state: 'hidden', timeout: timeoutMs })
     .catch(() => undefined); // fine if none ever appeared
-  await page.waitForLoadState('networkidle');
+
+  await page.waitForFunction(
+    () => {
+      const core = (globalThis as unknown as { sap?: { ui?: { getCore?: () => { getUIDirty?: () => boolean } } } }).sap?.ui?.getCore?.();
+      return !core?.getUIDirty?.();
+    },
+    undefined,
+    { timeout: timeoutMs },
+  );
 }

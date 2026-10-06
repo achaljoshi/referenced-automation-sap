@@ -23,5 +23,23 @@ module.exports = {
     // fixture doesn't depend on any other fixture - this is the documented
     // pattern, not a mistake.
     'no-empty-pattern': 'off',
+    // Hard waits are banned: every Playwright action and web-first assertion
+    // already waits for what it needs. A fixed sleep is either too short
+    // (flaky) or too long (slow) - use an assertion or an auto-waiting action.
+    'no-restricted-properties': [
+      'error',
+      {
+        property: 'waitForTimeout',
+        message: 'Hard waits are banned - use a web-first assertion (assertions.*) or an auto-waiting action instead.',
+      },
+    ],
+    // 'networkidle' is discouraged by Playwright itself (it never settles on pages that poll or stream).
+    'no-restricted-syntax': [
+      'error',
+      {
+        selector: "Literal[value='networkidle']",
+        message: "Don't wait for 'networkidle' - wait for the specific element/state you need instead.",
+      },
+    ],
   },
 };

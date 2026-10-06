@@ -1,8 +1,9 @@
 # referenced-automation-sap
 
-SAP Fiori/UI5 automation on Playwright, reusing [`referenced-automation-ui`](../referenced-automation-ui)'s `actions` wholesale - same `Page`, same logged actions, same everything. This repo adds exactly two standalone functions generic web automation doesn't need for a UI5 app.
+SAP automation on Playwright, in two halves that share one test runner, one logger and one report:
 
-> Classic SAP GUI Scripting (JACOB/COM, Windows-only) is out of scope here by design - see the note at the bottom for why.
+- **Fiori / UI5** (browser) - reuses [`referenced-automation-ui`](../referenced-automation-ui)'s `actions` wholesale, plus two helpers a UI5 app needs (`byControlId`, `waitForUI5Ready`). See [Fiori helpers](#fiori-helpers).
+- **Classic SAP GUI** (the Windows desktop client) - takes the `.vbs` files the SAP GUI Scripting recorder produces and converts them into Playwright tests that wait for SAP by themselves. See [Classic SAP GUI: recordings to Playwright](#classic-sap-gui-recordings-to-playwright).
 
 ## Fiori helpers
 
@@ -63,6 +64,104 @@ npm run allure:report  # generates allure-report/ and opens it in a browser
 
 Same as the other repos in this family: VS Code prompts for recommended extensions on open; IntelliJ/WebStorm ships ESLint/Prettier wired in plus an `npm: test` run configuration.
 
-## A note on classic SAP GUI Scripting
+## Classic SAP GUI: recordings to Playwright
 
-The previous (Java) version of this repo also covered classic SAP GUI Scripting via JACOB (a Java-COM bridge, Windows-only at runtime) for teams still running native SAP GUI transactions rather than Fiori/UI5. Playwright drives browsers, not Win32 COM objects, so there is no equivalent here - this repo is Fiori/UI5-only going forward. A team that still needs classic SAP GUI automation needs a separate, COM-capable tool for that half; it does not compose with this framework family the way Fiori/UI5 (which *is* browser automation) does.
+SAP GUI's built-in **Script Recording and Playback** writes a VBScript of what you clicked and typed, addressing every control by its technical id (`wnd[0]/usr/txtRSYST-BNAME`). The old Java framework drove those same ids through JACOB. This does the same through a small PowerShell bridge, and converts the recording for you:
+
+```
+ recording.vbs --sap-vbs-to-playwright--> recording.spec.ts --playwright test--> SapGuiSession --PowerShell/COM--> SAP GUI
+```
+
+### Convert a recording
+
+```bash
+npm run build
+cp ~/Documents/SAP/SAP\ GUI/my_recording.vbs recordings/
+npm run convert                                   # recordings/*.vbs -> tests/sapgui/*.spec.ts
+# or one file, with options:
+npx sap-vbs-to-playwright recordings/my_recording.vbs --out tests/sapgui --strict
+```
+
+What a converted line looks like - the recorder's ids are used **unchanged**:
+
+```vbs
+session.findById("wnd[0]/usr/txtRSYST-BNAME").text = "JDOE"
+session.findById("wnd[0]").sendVKey 0
+session.findById("wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG").columns.elementAt(1).width = 18
+```
+```ts
+await sap.setText('wnd[0]/usr/txtRSYST-BNAME', env.get('SAP_USER', 'JDOE')); // vbs:1
+await sap.sendVKey(0); // vbs:2
+await sap.set('wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG', 'columns.elementAt(1).width', 18); // vbs:3
+```
+
+See [`examples/va01_create_order.vbs`](examples/va01_create_order.vbs) and the spec generated from it, [`tests/gui/va01_create_order.spec.ts`](tests/gui/va01_create_order.spec.ts).
+
+Options: `--out`, `--test-import <module>` (your own base test, to add project fixtures), `--param <id-regex>=<ENV_VAR>` (read a field from the environment), `--tag`, `--keep-session-prefix`, `--no-line-comments`, `--strict` (exit 1 if anything needs a human - use it in CI).
+
+### Why the converted test doesn't fail the way a raw recording does
+
+A recording has **no waits**: it works when you record it (you were slow), and fails when it runs at machine speed because the next screen isn't there yet. `SapGuiSession` fixes that in one place instead of in every script:
+
+- before every step it waits for SAP to be idle **and** for the element to exist;
+- after a step that triggers a server round trip (`press`, `sendVKey`, `startTransaction`, ...) it waits for SAP to settle;
+- a "not found" while the screen is mid-change is retried until the timeout, not failed;
+- `WScript.Sleep` lines are dropped - a fixed sleep is too short on a slow day and too slow on every other;
+- a real failure tells you what **is** on the screen (nearest id that exists, what it contains, the status bar text) so the recording can be repaired without opening SAP;
+- every step is logged like the rest of the framework (worker + correlation id, timings), **passwords masked**.
+
+`tests/gui/session.spec.ts` proves this against a simulated SAP that models screen-change latency, and includes a *negative control*: the same steps without the session fail.
+
+### What is converted, and what is not
+
+| Recorded | Result |
+|---|---|
+| `findById(...).text = "x"`, `.press`, `.select`, `.setFocus`, `.sendVKey n`, `.selected = true` | converted |
+| `With ... End With`, `Set btn = findById(...)`, `_` continuations, `""` escapes | converted |
+| chained access: `.columns.elementAt(1).width`, `.getAbsoluteRow(3).selected = true`, `.verticalScrollbar.position` | converted (literal arguments only) |
+| `x = findById(...).text` | converted to `let x = await sap.get(...)` |
+| `WScript.Sleep n` | dropped (see above) |
+| the recorder's connect-to-SAP preamble | dropped - the fixture attaches the session |
+| typed passwords | **never copied** - replaced by `env.get('SAP_PASSWORD')` |
+| `If` / `For` / `Do` / `Select Case` / `Sub` / `MsgBox` | **not guessed**: emitted as a `// TODO(manual, vbs:N)` with the original line, and listed in the spec's header. Everything inside a block is held back too, so nothing runs unconditionally that was conditional |
+| a variable inside a chained path (`getAbsoluteRow(i)`) | flagged as TODO |
+
+A recording is straight-line by nature, so most are converted completely. `--strict` makes CI fail rather than let a TODO slip through.
+
+### Setting up a Windows machine
+
+SAP GUI Scripting is a Windows COM API: **tests that drive real SAP must run on a Windows machine with SAP GUI installed**. Anywhere else they are *skipped* (the report says why) - never silently passed.
+
+1. SAP GUI > Options > Accessibility & Scripting > Scripting: tick **Enable scripting**; **untick** "Notify when a script attaches to running GUI" and "Notify when a script opens a connection" (those pop-ups block an unattended run).
+2. The SAP server must allow it: profile parameter `sapgui/user_scripting = TRUE` (your SAP Basis team).
+3. Open SAP Logon and log on to the system (the default mode *attaches* to what is already open - it never creates or closes anyone's session). To have the test open the connection and start at the logon screen instead: `SAP_GUI_MODE=open` and `SAP_GUI_CONNECTION_NAME="<SAP Logon entry>"`.
+4. Check the machine: `npm run build && npm run doctor`. It tells you which of the above is wrong. `npx sap-gui-doctor --print-bridge` prints the exact PowerShell the framework runs, for whoever must approve it on a managed desktop (it only does what a recorded script does; no network, no installs, no registry or file changes).
+5. `npm run test:sapgui`
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `SAP_GUI_MODE` | `attach` or `open` | `attach` |
+| `SAP_GUI_CONNECTION_NAME` | SAP Logon entry, for `open` | |
+| `SAP_GUI_CONNECTION_INDEX` / `SAP_GUI_SESSION_INDEX` | which open connection / session, for `attach` | `0` / `0` |
+| `SAP_GUI_TIMEOUT_MS` | longest any one step waits | `30000` |
+| `SAP_GUI_POWERSHELL` | path to `powershell.exe` (a 32-bit SAP GUI needs `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`) | `powershell.exe` |
+| `SAP_USER`, `SAP_PASSWORD`, `SAP_CLIENT`, `SAP_LANGUAGE` | read by converted logon steps - put them in `.env.<name>` (not committed) or CI variables | |
+
+### Try it without SAP
+
+`FakeSapGui` / `createSampleSapSystem()` is an in-memory SAP with a logon -> VA01 -> save flow. `tests/gui/sapFakeTest.ts` wires it into a `test`, so a conversion can be executed on any machine:
+
+```bash
+npx sap-vbs-to-playwright examples/va01_create_order.vbs --out tests/gui --test-import ./sapFakeTest
+npm run test:framework
+```
+
+It only knows the screens it is given - it proves the converter and the waiting, **not** that a recording matches your real system.
+
+### What has and has not been verified
+
+Verified here (macOS, no SAP): the parser/generator (53 tests incl. the VA01 sample), the session's waiting and diagnostics against a simulator with screen-change latency, password handling, the CLI, and that the bridge script is ASCII-only and contains no network/file/registry calls.
+
+**Not verified until it runs on a Windows machine with SAP GUI**: the PowerShell bridge itself (it could not be executed without Windows PowerShell and SAP GUI), COM behaviour on your SAP release, and that a particular recording replays against your system. Run `npm run doctor` first, then convert and run one real recording - and report anything the doctor or the failure message does not explain, because that is the part that was written from the documented COM API rather than observed.
+
+Known limits: one session per test (a recording that opens a second session via `createSession` needs hand work); GUI dialogs outside SAP's own windows (file pickers, Windows security prompts) are not scriptable by SAP GUI Scripting; SAP GUI for HTML / WebGUI is a browser app - use the Fiori/Playwright half for that.

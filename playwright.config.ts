@@ -1,43 +1,13 @@
-import { defineConfig, devices } from '@playwright/test';
-import { loadEnv } from '@automation/referenced-automation-utils';
+import { createPlaywrightConfig } from '@automation/referenced-automation-utils';
 
-const env = loadEnv();
-const headless = env.getBoolean('HEADLESS', true);
-const requestedBrowser = env.get('BROWSER', 'chromium');
-
-// Chromium-family "channels" launch a real, already-installed browser
-// (system Chrome/Edge) instead of Playwright's own bundled binary - the
-// way to run this framework on a machine where `playwright install` can
-// never reach the internet to download browsers.
-const SYSTEM_BROWSER_CHANNELS = ['msedge', 'msedge-beta', 'msedge-dev', 'chrome', 'chrome-beta', 'chrome-dev'];
-
-const project = SYSTEM_BROWSER_CHANNELS.includes(requestedBrowser)
-  ? { name: requestedBrowser, use: { ...devices['Desktop Chrome'], channel: requestedBrowser } }
-  : { name: 'chromium', use: { ...devices['Desktop Chrome'] } };
-
-export default defineConfig({
-  testDir: './tests',
-  fullyParallel: true,
-  forbidOnly: !!process.env.CI,
-  // fioriCart.spec.ts hits a live SAP-hosted demo - one retry absorbs
-  // ordinary network jitter the same way it would for any external site.
-  retries: process.env.CI ? 2 : 0,
-  timeout: 60_000,
-  reporter: [
-    ['list'],
-    ['html', { open: 'never' }],
-    ['junit', { outputFile: 'test-results/junit.xml' }],
-    // Raw results only - generating the viewable HTML report is a separate
-    // step (`npm run allure:report`) since it needs a JRE on PATH, unlike
-    // collecting results here which is pure JS/TS.
-    ['allure-playwright', { resultsDir: 'allure-results' }],
-  ],
-  use: {
-    baseURL: env.getOptional('BASE_URL'),
-    headless,
-    screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
-    trace: 'retain-on-failure',
-  },
-  projects: [project],
+// Every repo in the family runs Playwright the same way, defined once in
+// utils - see createPlaywrightConfig's doc comment for every env var it reads.
+export default createPlaywrightConfig({
+  dir: __dirname,
+  name: '@automation/referenced-automation-sap',
+  baseUrlKey: 'BASE_URL',
+  // fioriCart.spec.ts hits a live SAP-hosted demo - a second CI retry absorbs
+  // ordinary network jitter the way it would for any external site.
+  retriesOnCi: 2,
+  testTimeoutMs: 60_000,
 });
