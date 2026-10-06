@@ -18,7 +18,7 @@ export interface ChainLink {
 export type SapGuiCommand =
   | { op: 'ping' }
   | { op: 'attach'; connectionIndex: number; sessionIndex: number }
-  | { op: 'open'; connectionName: string }
+  | { op: 'open'; connectionName: string; logonPath?: string }
   | { op: 'exists'; id: string }
   | { op: 'get'; id: string; prop: string; via?: ChainLink[] }
   | { op: 'set'; id: string; prop: string; value: SapGuiValue; via?: ChainLink[] }

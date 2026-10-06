@@ -101,7 +101,12 @@ export class FakeSapGui implements SapGuiTransport {
   private visible(id: string): boolean {
     if (id === '') return true;
     const spec = this.current.elements[id];
-    if (!spec) return false;
+    if (!spec) {
+      // Like real SAP, a container (wnd[0]/usr, wnd[0]/tbar[0] ...) exists whenever something inside it does,
+      // even if the screen definition only lists the leaves.
+      const inside = `${id}/`;
+      return Object.keys(this.current.elements).some((key) => key.startsWith(inside) && this.visible(key));
+    }
     return Date.now() >= this.readyAt + (spec.appearsAfterMs ?? 0);
   }
 
@@ -139,9 +144,13 @@ export class FakeSapGui implements SapGuiTransport {
         return this.read(command.id, fullName(command.via, command.prop));
       case 'children': {
         const prefix = command.id === '' ? '' : `${command.id}/`;
-        return Object.keys(this.current.elements)
-          .filter((id) => id.startsWith(prefix) && !id.slice(prefix.length).includes('/') && id !== command.id && this.visible(id))
-          .map((id): SapGuiChild => ({ id, type: this.current.elements[id]?.type ?? '', name: id.split('/').pop() ?? '', text: String(this.read(id, 'text')) }));
+        const names = new Set<string>();
+        for (const key of Object.keys(this.current.elements)) {
+          if (key.startsWith(prefix) && key !== command.id) names.add(`${prefix}${key.slice(prefix.length).split('/')[0]}`);
+        }
+        return [...names]
+          .filter((id) => this.visible(id))
+          .map((id): SapGuiChild => ({ id, type: this.current.elements[id]?.type ?? 'GuiContainer', name: id.split('/').pop() ?? '', text: String(this.read(id, 'text')) }));
       }
       case 'set': {
         this.assertAttached();
@@ -227,28 +236,40 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
         status: wrongLogin,
         elements: {
           'wnd[0]': { type: 'GuiMainWindow' },
+          'wnd[0]/usr/txtRSYST-MANDT': { type: 'GuiTextField' },
           'wnd[0]/usr/txtRSYST-BNAME': { type: 'GuiTextField' },
-          'wnd[0]/sbar': { type: 'GuiStatusbar' },
+          'wnd[0]/usr/pwdRSYST-BCODE': { type: 'GuiPasswordField' },
+          'wnd[0]/usr/txtRSYST-LANGU': { type: 'GuiTextField' },
+          // real SAP stays on the logon screen and reports the error in the status bar (type E)
+          'wnd[0]/sbar': { type: 'GuiStatusbar', props: { messageType: 'E' } },
         },
       },
       {
         name: 'easyAccess',
         elements: {
-          'wnd[0]': { type: 'GuiMainWindow' },
+          'wnd[0]': { type: 'GuiMainWindow', props: { text: 'SAP Easy Access' } },
           'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
           'wnd[0]/sbar': { type: 'GuiStatusbar' },
         },
-        onTransaction: (tcode) => (tcode.toUpperCase() === 'VA01' ? 'va01Initial' : undefined),
+        onTransaction: (tcode) => (tcode.toUpperCase() === 'VA01' ? 'va01Initial' : 'otherTransaction'),
         onVKey: (vKey, ctx) => {
           if (vKey !== 0) return undefined;
           const code = String(ctx.get('wnd[0]/tbar[0]/okcd', 'text')).replace(/^\/n/i, '').toUpperCase();
-          return code === 'VA01' ? 'va01Initial' : undefined;
+          return code === 'VA01' ? 'va01Initial' : code ? 'otherTransaction' : undefined;
+        },
+      },
+      {
+        name: 'otherTransaction',
+        elements: {
+          'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Some other transaction' } },
+          'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
+          'wnd[0]/sbar': { type: 'GuiStatusbar' },
         },
       },
       {
         name: 'va01Initial',
         elements: {
-          'wnd[0]': { type: 'GuiMainWindow' },
+          'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Create Sales Order: Initial Screen' } },
           'wnd[0]/usr/ctxtVBAK-AUART': { type: 'GuiCTextField' },
           'wnd[0]/usr/ctxtVBAK-VKORG': { type: 'GuiCTextField' },
           'wnd[0]/usr/ctxtVBAK-VTWEG': { type: 'GuiCTextField' },

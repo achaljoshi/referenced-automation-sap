@@ -72,6 +72,57 @@ SAP GUI's built-in **Script Recording and Playback** writes a VBScript of what y
  recording.vbs --sap-vbs-to-playwright--> recording.spec.ts --playwright test--> SapGuiSession --PowerShell/COM--> SAP GUI
 ```
 
+### Getting started with SAP GUI (first time, from zero)
+
+**What library opens SAP GUI? None you need to install or learn.** SAP GUI itself has a built-in automation interface (SAP GUI Scripting, a Windows COM API - the same thing the old Java framework drove through JACOB). This repo talks to it through a small PowerShell bridge that ships inside it, and Playwright is only the *test runner* (reporting, retries, parallelism, `expect`). You write plain TypeScript with a `sap` object.
+
+**Try it right now, with no SAP and on any OS** - a built-in fake SAP runs the three sample tests so you can see what they do:
+
+```bash
+npm install
+npm run build
+npm run try:simulator            # runs tests/sapgui/*.spec.ts against the fake SAP
+```
+
+**Then point the same tests at your real SAP** (needs a Windows machine with SAP GUI installed):
+
+1. **Enable scripting, once.** SAP GUI > Options > Accessibility & Scripting > Scripting: tick *Enable scripting*, and **untick** both "Notify when a script attaches..." / "...opens a connection" (those pop-ups stall a run). Your SAP Basis team must also allow it on the server (`sapgui/user_scripting = TRUE`).
+2. **Say where SAP is.** Edit `.env.qa` (or `dev`/`stage`): set `SAP_GUI_CONNECTION_NAME` to the entry exactly as it appears in SAP Logon (e.g. `QA1 - ERP Quality`), `SAP_CLIENT`, `SAP_USER`. Then create **`.env.qa.local`** (git ignores it) containing only the secret: `SAP_PASSWORD=your-password`. `SAP_GUI_MODE=open` makes the test open that connection itself (and start SAP Logon if it isn't running); `attach` instead uses a SAP Logon window you already have open and logged in.
+3. **Check the machine:** `npm run build && npm run doctor`. It does what the tests will do (opens the connection in `open` mode, or attaches in `attach` mode) and each line says OK or FAIL and what to fix.
+4. **Run the first test:** `npm run test:sapgui -- 01_` - it logs on and checks it landed on SAP Easy Access. If it passes, the connection, credentials and scripting setup are all correct. Run `ENV=dev npm run test:sapgui` to use `.env.dev` instead.
+5. **Run the rest:** `npm run test:sapgui` (`02_open_transaction` opens the transaction in `SAP_SAMPLE_TCODE`; `03_...TEMPLATE` stays skipped until you adapt it - see below).
+
+**The three sample tests** (`tests/sapgui/`) are the pattern to copy:
+
+| File | Shows |
+|---|---|
+| `01_connect_and_login.spec.ts` | the smallest test: the `loggedInSap` fixture logs on for you; read a window title; check a control exists |
+| `02_open_transaction.spec.ts` | `startTransaction`, reading the status bar (`E` = error), configuring a test from `.env` |
+| `03_create_sales_order.TEMPLATE.spec.ts` + `support/salesOrder.ts` | a business flow as a few functions ("page object") around the ids; table-control cells; save and read the confirmation |
+
+**How to write your own test** - copy one and use these (every call waits for SAP by itself; never add a sleep):
+
+```ts
+import { expect, test } from './support/sapTest';
+
+test('my flow @sapgui', async ({ loggedInSap: sap }) => {
+  await sap.startTransaction('VA03');                         // like typing /nVA03 + Enter
+  await sap.setText('wnd[0]/usr/ctxtVBAK-VBELN', '4711');     // type into a field
+  await sap.sendVKey(0);                                      // Enter   (3 = Back, 11 = Save, 8 = Execute, 12 = Cancel)
+  await sap.press('wnd[0]/tbar[1]/btn[7]');                   // click a button
+  await sap.setSelected('wnd[0]/usr/chkX', true);             // tick a checkbox
+  await sap.select('wnd[0]/usr/tabsTAB/tabpT1');              // select a tab / menu item
+  const status = await sap.statusBarText();                   // message at the bottom of the screen
+  const value = await sap.getText('wnd[0]/usr/txtFIELD');     // read a field
+  expect(status).toMatch(/saved/i);
+  await sap.call('wnd[0]/usr/tblX', 'someMethod', 1, 'arg');  // anything else the SAP GUI scripting API offers
+});
+```
+
+**Finding the ids** (the `wnd[0]/usr/...` strings) - two ways, no guessing:
+- **Record it:** with SAP GUI's own *Script Recording and Playback* (in the **Alt+F12** menu), record yourself doing the flow, save the `.vbs`, drop it in `recordings/` and run `npm run convert` (below). You get a finished test.
+- **Look at the screen:** open the screen in SAP, then `npm run doctor -- --dump` prints every control on it with its id and type (`npm run doctor -- --dump "wnd[1]"` for a pop-up). Copy the id into `sap.setText(...)`.
+
 ### Convert a recording
 
 ```bash
@@ -144,6 +195,10 @@ SAP GUI Scripting is a Windows COM API: **tests that drive real SAP must run on 
 | `SAP_GUI_CONNECTION_NAME` | SAP Logon entry, for `open` | |
 | `SAP_GUI_CONNECTION_INDEX` / `SAP_GUI_SESSION_INDEX` | which open connection / session, for `attach` | `0` / `0` |
 | `SAP_GUI_TIMEOUT_MS` | longest any one step waits | `30000` |
+| `SAP_GUI_LOGON_PATH` | `saplogon.exe`, started by `open` mode if SAP Logon isn't running | `C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe` |
+| `SAP_GUI_SIMULATOR` | `true` = use the built-in fake SAP (what `npm run try:simulator` sets) | `false` |
+| `SAP_SAMPLE_TCODE` | transaction used by sample test 02 | `SU3` |
+| `SAP_RUN_TEMPLATES` | `true` = also run the `...TEMPLATE` tests against a real SAP | `false` |
 | `SAP_GUI_POWERSHELL` | path to `powershell.exe` (a 32-bit SAP GUI needs `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`) | `powershell.exe` |
 | `SAP_USER`, `SAP_PASSWORD`, `SAP_CLIENT`, `SAP_LANGUAGE` | read by converted logon steps - put them in `.env.<name>` (not committed) or CI variables | |
 

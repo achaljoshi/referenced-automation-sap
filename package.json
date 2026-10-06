@@ -31,10 +31,11 @@
     "allure:generate": "allure generate allure-results --clean -o allure-report",
     "allure:open": "allure open allure-report",
     "allure:report": "npm run allure:generate && npm run allure:open",
-    "convert": "node dist/cli/convertVbs.js recordings --out tests/sapgui",
+    "convert": "node dist/cli/convertVbs.js recordings --out tests/sapgui --test-import ./support/sapTest",
     "test:framework": "playwright test tests/gui",
     "test:sapgui": "playwright test tests/sapgui --grep @sapgui",
-    "doctor": "node dist/cli/doctor.js"
+    "doctor": "node dist/cli/doctor.js",
+    "try:simulator": "node scripts/try-simulator.js"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.62.1 <2.0.0"

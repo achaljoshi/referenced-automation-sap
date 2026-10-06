@@ -37,7 +37,17 @@ test.describe('the PowerShell bridge text', () => {
   });
 
   test('does not touch the network, the registry or the file system (apart from the screenshot SAP itself writes)', () => {
-    expect(BRIDGE_SCRIPT).not.toMatch(/Invoke-WebRequest|Invoke-RestMethod|Net\.WebClient|Set-ItemProperty|New-Item|Remove-Item|Set-Content|Out-File|Start-Process/i);
+    expect(BRIDGE_SCRIPT).not.toMatch(/Invoke-WebRequest|Invoke-RestMethod|Net\.WebClient|Set-ItemProperty|New-Item|Remove-Item|Set-Content|Out-File/i);
+  });
+
+  test('the only program it can start is SAP Logon, from the configured path, and only when SAP Logon is not running', () => {
+    const starts = BRIDGE_SCRIPT.match(/Start-Process[^\n]*/gi) ?? [];
+    expect(starts).toEqual(['Start-Process -FilePath $logonPath | Out-Null']);
+    // ... and only after the attempt to attach to a running one failed and a path was supplied
+    const attach = BRIDGE_SCRIPT.indexOf('$engine = Try-GetScriptingEngine');
+    expect(attach).toBeGreaterThan(-1);
+    expect(BRIDGE_SCRIPT.indexOf('Start-Process')).toBeGreaterThan(attach);
+    expect(BRIDGE_SCRIPT).toMatch(/IsNullOrEmpty\(\$logonPath\)[\s\S]*throw/);
   });
 
   test('braces and quotes are balanced (a cheap guard against an editing slip - not a PowerShell parser)', () => {

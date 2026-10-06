@@ -10,7 +10,9 @@
  * SAP Logon connection the user already has, then performs exactly the
  * property reads/writes and method calls it is asked to - the same calls a
  * recorded VBScript makes. No network access, nothing installed, nothing
- * persisted, no registry or file changes (apart from a screenshot when asked).
+ * persisted, no registry or file changes (apart from a screenshot when asked). The one
+ * program it can start is SAP Logon, from the path you configure, and only when
+ * connecting to a connection by name while SAP Logon is not already running.
  *
  * ASCII only on purpose: Windows PowerShell 5.1 reads a script without a
  * byte-order mark using the system code page, which would corrupt anything else.
@@ -47,15 +49,39 @@ function Convert-Out($value) {
     return [string]$value
 }
 
-function Get-ScriptingEngine {
+function Try-GetScriptingEngine {
     try {
         $rot = New-Object -ComObject 'SapROTWr.SapROTWrapper'
         $entry = Invoke-Com $rot 'GetROTEntry' ([object[]]@('SAPGUI'))
         if ($null -ne $entry) { return ,(Invoke-Com $entry 'GetScriptingEngine' $null) }
     } catch { }
-    Add-Type -AssemblyName Microsoft.VisualBasic
-    $auto = [Microsoft.VisualBasic.Interaction]::GetObject('SAPGUI')
-    return ,(Invoke-Com $auto 'GetScriptingEngine' $null)
+    try {
+        Add-Type -AssemblyName Microsoft.VisualBasic
+        $auto = [Microsoft.VisualBasic.Interaction]::GetObject('SAPGUI')
+        return ,(Invoke-Com $auto 'GetScriptingEngine' $null)
+    } catch { }
+    return $null
+}
+
+# $logonPath is only used when SAP Logon is not running yet: it is started
+# (the same as double-clicking its icon) and we wait for its scripting engine.
+function Get-ScriptingEngine($logonPath) {
+    $engine = Try-GetScriptingEngine
+    if ($null -ne $engine) { return ,$engine }
+    if ([string]::IsNullOrEmpty($logonPath)) {
+        throw 'SAP Logon is not running, so there is no SAP GUI scripting engine to attach to. Start SAP Logon, or set SAP_GUI_LOGON_PATH so it can be started for you.'
+    }
+    if (-not (Test-Path -LiteralPath $logonPath)) {
+        throw ('SAP Logon is not running and SAP_GUI_LOGON_PATH does not exist: ' + $logonPath)
+    }
+    Start-Process -FilePath $logonPath | Out-Null
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        $engine = Try-GetScriptingEngine
+        if ($null -ne $engine) { return ,$engine }
+    }
+    throw 'Started SAP Logon but its scripting engine did not appear within 60 seconds. Is scripting enabled (SAP GUI Options > Accessibility and Scripting > Scripting)?'
 }
 
 function Find-Element($id) {
@@ -101,13 +127,13 @@ while ($true) {
         switch ($cmd.op) {
             'ping' { Send-Reply $rid $true 'pong' $null $null }
             'attach' {
-                $engine = Get-ScriptingEngine
+                $engine = Get-ScriptingEngine $null
                 $connection = Get-ComProperty $engine 'Children' ([object[]]@([int]$cmd.connectionIndex))
                 $script:session = Get-ComProperty $connection 'Children' ([object[]]@([int]$cmd.sessionIndex))
                 Send-Reply $rid $true $null $null $null
             }
             'open' {
-                $engine = Get-ScriptingEngine
+                $engine = Get-ScriptingEngine ([string]$cmd.logonPath)
                 $connection = Invoke-Com $engine 'OpenConnection' ([object[]]@([string]$cmd.connectionName))
                 $script:session = Get-ComProperty $connection 'Children' ([object[]]@(0))
                 Send-Reply $rid $true $null $null $null

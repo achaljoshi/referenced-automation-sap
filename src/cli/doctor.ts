@@ -2,6 +2,7 @@
 import { loadEnv } from '@automation/referenced-automation-utils';
 import { BRIDGE_SCRIPT } from '../gui/bridgeScript';
 import { PowerShellTransport } from '../gui/powershellTransport';
+import { dumpScreen, formatScreenDump } from '../gui/inspect';
 import { SapGuiSession } from '../gui/session';
 
 /**
@@ -31,22 +32,36 @@ async function main(): Promise<void> {
   }
 
   try {
-    const session = await SapGuiSession.attach(transport, {
-      connectionIndex: env.getInt('SAP_GUI_CONNECTION_INDEX', 0),
-      sessionIndex: env.getInt('SAP_GUI_SESSION_INDEX', 0),
-      timeoutMs: 5_000,
-    });
-    out(true, 'attached to a running SAP GUI session');
+    // Do what the tests will do: open the named connection, or attach to one you have open.
+    const mode = env.get('SAP_GUI_MODE', 'attach');
+    const session =
+      mode === 'open'
+        ? await SapGuiSession.open(transport, env.get('SAP_GUI_CONNECTION_NAME'), {
+            timeoutMs: 15_000,
+            logonPath: env.get('SAP_GUI_LOGON_PATH', 'C:\\Program Files (x86)\\SAP\\FrontEnd\\SAPgui\\saplogon.exe'),
+          })
+        : await SapGuiSession.attach(transport, {
+            connectionIndex: env.getInt('SAP_GUI_CONNECTION_INDEX', 0),
+            sessionIndex: env.getInt('SAP_GUI_SESSION_INDEX', 0),
+            timeoutMs: 5_000,
+          });
+    out(true, mode === 'open' ? `opened connection "${env.get('SAP_GUI_CONNECTION_NAME')}"` : 'attached to a running SAP GUI session');
     const title = await session.get('wnd[0]', 'text').catch(() => '(unreadable)');
     out(true, `main window title: ${String(title)}`);
     out(true, `status bar: "${await session.statusBarText().catch(() => '(unreadable)')}"`);
     out(await session.healthCheck(), 'session answers a health check');
+
+    const dumpIndex = process.argv.indexOf('--dump');
+    if (dumpIndex !== -1) {
+      const root = process.argv[dumpIndex + 1] && !process.argv[dumpIndex + 1]?.startsWith('-') ? (process.argv[dumpIndex + 1] as string) : 'wnd[0]';
+      process.stdout.write(`\nControls on ${root} (copy the ids into sap.setText / sap.press ...):\n\n${formatScreenDump(await dumpScreen(session, root))}\n`);
+    }
   } catch (error) {
-    out(false, `could not attach: ${(error as Error).message}`);
+    out(false, `could not ${env.get('SAP_GUI_MODE', 'attach') === 'open' ? 'open the connection' : 'attach'}: ${(error as Error).message}`);
     process.stdout.write(
       [
         '       Check, in order:',
-        '        1. SAP Logon is open with at least one connection and a session',
+        '        1. attach mode: SAP Logon is open with a connection and a session.  open mode: SAP_GUI_CONNECTION_NAME matches a SAP Logon entry exactly',
         '        2. SAP GUI > Options > Accessibility & Scripting > Scripting: "Enable scripting" is ticked',
         '           and both "Notify when a script attaches" / "...opens a connection" are UNticked (those popups stall a run)',
         '        3. The SAP server allows it: profile parameter sapgui/user_scripting = TRUE (ask your SAP Basis team)',

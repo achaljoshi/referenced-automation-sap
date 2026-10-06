@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test as uiTest } from '@automation/referenced-automation-ui';
 import { getLogger, loadEnv } from '@automation/referenced-automation-utils';
+import { createSampleSapSystem } from './fakeSapGui';
 import { PowerShellTransport } from './powershellTransport';
 import { SapGuiSession } from './session';
 import type { SapGuiTransport } from './types';
@@ -20,6 +21,7 @@ export interface SapGuiOptions {
 }
 
 const log = getLogger('sap-gui');
+const DEFAULT_LOGON_PATH = 'C:\\Program Files (x86)\\SAP\\FrontEnd\\SAPgui\\saplogon.exe';
 
 /**
  * `test` with a `sap` fixture: a SapGuiSession that waits for SAP on every
@@ -34,6 +36,10 @@ const log = getLogger('sap-gui');
  *   SAP_GUI_SESSION_INDEX     which session in it, for mode=attach     (default 0)
  *   SAP_GUI_TIMEOUT_MS        longest any one step waits               (default 30000)
  *   SAP_GUI_POWERSHELL        path to powershell.exe (32-bit SAP GUI may need the SysWOW64 one)
+ *   SAP_GUI_LOGON_PATH        saplogon.exe, started for mode=open if SAP Logon isn't running
+ *                             (default C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe)
+ *   SAP_GUI_SIMULATOR         true = run against the built-in fake SAP instead of a real one (any OS) -
+ *                             to try the sample tests before you have a SAP system to point at
  *
  * On a machine that isn't Windows the test is SKIPPED with the reason shown
  * in the report - never silently passed.
@@ -43,20 +49,26 @@ export const sapGuiTest = uiTest.extend<{ sap: SapGuiSession } & SapGuiOptions>(
   sapGuiTransport: [undefined, { option: true }],
 
   sap: async ({ sapGuiMode, sapGuiTransport }, use, testInfo) => {
-    if (!sapGuiTransport) {
-      testInfo.skip(process.platform !== 'win32', 'SAP GUI Scripting needs Windows with SAP GUI installed - this test was skipped, not run.');
-    }
     const env = loadEnv();
+    const simulate = env.getBoolean('SAP_GUI_SIMULATOR', false);
+    if (!sapGuiTransport && !simulate) {
+      testInfo.skip(process.platform !== 'win32', 'SAP GUI Scripting needs Windows with SAP GUI installed - this test was skipped, not run. (Set SAP_GUI_SIMULATOR=true to run against the built-in fake SAP.)');
+    }
     const timeoutMs = env.getInt('SAP_GUI_TIMEOUT_MS', 30_000);
-    const mode = sapGuiMode ?? (env.get('SAP_GUI_MODE', 'attach') as 'attach' | 'open');
+    // The simulator always starts at the logon screen, like mode=open does on a real system.
+    const mode = simulate ? 'attach' : (sapGuiMode ?? (env.get('SAP_GUI_MODE', 'attach') as 'attach' | 'open'));
 
     const transport =
       (await sapGuiTransport?.()) ??
+      (simulate ? createSampleSapSystem({ user: env.get('SAP_USER', 'TESTUSER'), password: env.get('SAP_PASSWORD', 'correct-horse'), client: env.get('SAP_CLIENT', '100'), transitionDelayMs: 100 }) : undefined) ??
       (await PowerShellTransport.start({ powershellPath: env.getOptional('SAP_GUI_POWERSHELL') }));
 
     const session =
       mode === 'open'
-        ? await SapGuiSession.open(transport, env.get('SAP_GUI_CONNECTION_NAME'), { timeoutMs })
+        ? await SapGuiSession.open(transport, env.get('SAP_GUI_CONNECTION_NAME'), {
+            timeoutMs,
+            logonPath: env.get('SAP_GUI_LOGON_PATH', DEFAULT_LOGON_PATH),
+          })
         : await SapGuiSession.attach(transport, {
             timeoutMs,
             connectionIndex: env.getInt('SAP_GUI_CONNECTION_INDEX', 0),

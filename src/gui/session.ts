@@ -105,15 +105,25 @@ export class SapGuiSession implements Adapter {
     return new SapGuiSession(transport, sessionOptions);
   }
 
-  /** Opens a new connection by its SAP Logon name (e.g. "QR1 - Retail"), landing on its logon screen. */
-  static async open(transport: SapGuiTransport, connectionName: string, options: SapGuiSessionOptions = {}): Promise<SapGuiSession> {
-    await adapterStep('sap-gui', 'open connection', () => transport.request({ op: 'open', connectionName }), {
+  /** Opens a new connection by its SAP Logon name (e.g. "QR1 - Retail"), landing on its logon screen. If SAP Logon is not running it is started from `logonPath` first. */
+  static async open(
+    transport: SapGuiTransport,
+    connectionName: string,
+    options: SapGuiSessionOptions & { logonPath?: string } = {},
+  ): Promise<SapGuiSession> {
+    const { logonPath, ...sessionOptions } = options;
+    await adapterStep('sap-gui', 'open connection', () => transport.request({ op: 'open', connectionName, logonPath }), {
       details: { connectionName },
     });
-    return new SapGuiSession(transport, options);
+    return new SapGuiSession(transport, sessionOptions);
   }
 
   // ---------------------------------------------------------------- waiting
+
+  /** The controls directly inside `id` ('' = the session), with their technical ids. */
+  async children(id: string): Promise<SapGuiChild[]> {
+    return (await this.transport.request({ op: 'children', id })) as SapGuiChild[];
+  }
 
   async exists(id: string): Promise<boolean> {
     return (await this.transport.request({ op: 'exists', id })) === true;
