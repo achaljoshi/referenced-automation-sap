@@ -36,7 +36,8 @@
     "test:sapgui": "playwright test tests/sapgui --grep @sapgui",
     "doctor": "node dist/cli/doctor.js",
     "try:simulator": "node scripts/try-simulator.js",
-    "insights": "node dist/cli/insights.js report"
+    "insights": "node dist/cli/insights.js report",
+    "contracts": "node dist/cli/contracts.js"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.62.1 <2.0.0"
@@ -65,6 +66,7 @@
     "sap-gui-doctor": "./dist/cli/doctor.js",
     "sap-gui-secret": "./dist/cli/secret.js",
     "sap-gui-insights": "./dist/cli/insights.js",
-    "sap-gui-data": "./dist/cli/data.js"
+    "sap-gui-data": "./dist/cli/data.js",
+    "sap-gui-contracts": "./dist/cli/contracts.js"
   }
 }

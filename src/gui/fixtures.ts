@@ -105,6 +105,7 @@ export class SapConnection {
     const simulate = this.simulated;
     const timeoutMs = env.getInt('SAP_GUI_TIMEOUT_MS', 30_000);
     const evidence = this.evidence === 'steps' ? 'steps' : 'off';
+    const fallbacks = env.get('SAP_GUI_FALLBACKS', 'report') as 'report' | 'fail' | 'off';
     // The simulator always starts at the logon screen, like mode=open does on a real system.
     const mode = simulate
       ? 'attach'
@@ -141,7 +142,7 @@ export class SapConnection {
         (await PowerShellTransport.start({
           powershellPath: env.getOptional('SAP_GUI_POWERSHELL'),
         }));
-      const session = await this.openSession(mode, transport, env, timeoutMs, evidence);
+      const session = await this.openSession(mode, transport, env, timeoutMs, evidence, fallbacks);
       if (this.lease) session.assignedUser = this.lease.user;
       return session;
     } catch (error) {
@@ -158,12 +159,14 @@ export class SapConnection {
     env: ReturnType<typeof loadEnv>,
     timeoutMs: number,
     evidence: 'off' | 'steps',
+    fallbacks: 'report' | 'fail' | 'off' = 'report',
   ): Promise<SapGuiSession> {
     if (mode === 'open') {
       this.opened = true;
       return SapGuiSession.open(transport, env.getOptional('SAP_GUI_CONNECTION_NAME') ?? '', {
         timeoutMs,
         evidence,
+        fallbacks,
         logonPath: env.get('SAP_GUI_LOGON_PATH', DEFAULT_LOGON_PATH),
         connectionString: env.getOptional('SAP_GUI_CONNECTION_STRING'),
       });
@@ -171,6 +174,7 @@ export class SapConnection {
     return SapGuiSession.attach(transport, {
       timeoutMs,
       evidence,
+      fallbacks,
       connectionIndex: env.getInt('SAP_GUI_CONNECTION_INDEX', 0),
       sessionIndex: env.getInt('SAP_GUI_SESSION_INDEX', 0),
     });
@@ -293,6 +297,12 @@ function recordInsight(
         system: where?.system,
         client: where?.client,
         user: where?.user,
+        drift: session.driftItems.map((d) => ({
+          expected: d.expected,
+          foundId: d.foundId,
+          tx: d.tx,
+          screen: d.screen,
+        })),
         steps: session.steps.map((e) => ({
           tx: e.tx ?? '',
           program: e.program,
@@ -335,6 +345,17 @@ export async function attachDiagnostics(
       await testInfo
         .attach(`sap-evidence: ${item.label}`, { path: item.file, contentType: 'image/png' })
         .catch(() => undefined);
+  }
+  if (session.driftItems.length > 0) {
+    const body = session.driftItems
+      .map(
+        (d) =>
+          `${d.expected}\n  now found via ${d.usedFallback} at ${d.foundId}${d.tx ? `  (transaction ${d.tx}, screen ${d.screen})` : ''}`,
+      )
+      .join('\n');
+    await testInfo
+      .attach('sap-locator-drift', { body, contentType: 'text/plain' })
+      .catch(() => undefined);
   }
   if (!failed || mode === 'off') return;
 

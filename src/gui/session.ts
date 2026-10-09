@@ -1,10 +1,23 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { adapterStep, AdapterError, getLogger, type Adapter } from '@automation/referenced-automation-utils';
+import {
+  adapterStep,
+  AdapterError,
+  getLogger,
+  type Adapter,
+} from '@automation/referenced-automation-utils';
 import { SapGrid, SapTable, SapTree } from './controls';
 import { SapLocator } from './locator';
 import { parseMemberPath } from './memberPath';
-import { SapGuiTransportError, type ControlInfo, type SapContext, type FindCriteria, type SapGuiChild, type SapGuiTransport, type SapGuiValue } from './types';
+import {
+  SapGuiTransportError,
+  type ControlInfo,
+  type SapContext,
+  type FindCriteria,
+  type SapGuiChild,
+  type SapGuiTransport,
+  type SapGuiValue,
+} from './types';
 
 export interface SapGuiSessionOptions {
   /** How long any single step may wait for its element / for SAP to go idle. Default 30s (SAP_GUI_TIMEOUT_MS). */
@@ -17,6 +30,18 @@ export interface SapGuiSessionOptions {
   evidence?: 'off' | 'steps';
   /** Ask SAP which transaction/program/screen it is on after each screen change, and attribute every step to it (journal, coverage, response-time baseline, failure messages). One extra call per screen change. Default true. */
   trackContext?: boolean;
+  /** What to do when a locator's primary id is missing but a fallback finds the control: 'report' (use it, record the drift - default), 'fail' (fail naming the new id), 'off' (ignore fallbacks). SAP_GUI_FALLBACKS. */
+  fallbacks?: 'report' | 'fail' | 'off';
+}
+
+/** A control found by a fallback because its usual technical id was no longer on the screen. */
+export interface LocatorDrift {
+  expected: string;
+  usedFallback: string;
+  /** The technical id that actually works now - what to put in the page object. */
+  foundId: string;
+  tx?: string;
+  screen?: string;
 }
 
 /** One line of the step journal: what the session did, how long it took, whether it worked. */
@@ -76,7 +101,9 @@ export class SapGuiElementNotFoundError extends AdapterError {
               .join(', ')}${siblings.length > 12 ? ', ...' : ''}`
           : '') +
         (statusBar ? `. Status bar says: "${statusBar}"` : '') +
-        (where && (where.transaction || where.program) ? `. SAP is on transaction ${where.transaction || '(none)'}, screen ${where.screen}, program ${where.program}` : ''),
+        (where && (where.transaction || where.program)
+          ? `. SAP is on transaction ${where.transaction || '(none)'}, screen ${where.screen}, program ${where.program}`
+          : ''),
       { cause },
     );
     this.name = 'SapGuiElementNotFoundError';
@@ -90,12 +117,34 @@ export class SapGuiElementNotFoundError extends AdapterError {
 // step runs, which is exactly the wait a recorded script is missing.
 const SERVER_ROUND_TRIP_METHODS = new Set(
   [
-    'press', 'sendVKey', 'select', 'doubleClick', 'doubleClickCurrentCell', 'clickCurrentCell',
-    'doubleClickNode', 'doubleClickItem', 'clickLink', 'pressButton', 'pressToolbarButton',
-    'pressToolbarContextButton', 'selectContextMenuItem', 'selectContextMenuItemByText',
-    'selectContextMenuItemByPosition', 'contextMenu', 'nodeContextMenu', 'itemContextMenu',
-    'selectNode', 'expandNode', 'collapseNode', 'startTransaction', 'endTransaction', 'close',
-    'createSession', 'openContextMenu', 'pressEnter', 'sendCommand',
+    'press',
+    'sendVKey',
+    'select',
+    'doubleClick',
+    'doubleClickCurrentCell',
+    'clickCurrentCell',
+    'doubleClickNode',
+    'doubleClickItem',
+    'clickLink',
+    'pressButton',
+    'pressToolbarButton',
+    'pressToolbarContextButton',
+    'selectContextMenuItem',
+    'selectContextMenuItemByText',
+    'selectContextMenuItemByPosition',
+    'contextMenu',
+    'nodeContextMenu',
+    'itemContextMenu',
+    'selectNode',
+    'expandNode',
+    'collapseNode',
+    'startTransaction',
+    'endTransaction',
+    'close',
+    'createSession',
+    'openContextMenu',
+    'pressEnter',
+    'sendCommand',
   ].map((m) => m.toLowerCase()),
 );
 
@@ -131,6 +180,8 @@ export class SapGuiSession implements Adapter {
   private readonly stablePolls: number;
   private readonly evidenceMode: 'off' | 'steps';
   private readonly trackContext: boolean;
+  readonly fallbackMode: 'report' | 'fail' | 'off';
+  private readonly drift: LocatorDrift[] = [];
   /** The pooled SAP user this session was given (SAP_USER_POOL); `logon()` uses it. */
   assignedUser?: string;
   private lastContext?: SapContext;
@@ -150,6 +201,7 @@ export class SapGuiSession implements Adapter {
     this.stablePolls = options.stablePolls ?? 2;
     this.evidenceMode = options.evidence ?? 'off';
     this.trackContext = options.trackContext ?? true;
+    this.fallbackMode = options.fallbacks ?? 'report';
   }
 
   /** Attaches to a SAP Logon connection/session that is already open (the safe default for a shared system - it never creates or closes anyone's session). */
@@ -158,9 +210,14 @@ export class SapGuiSession implements Adapter {
     options: SapGuiSessionOptions & { connectionIndex?: number; sessionIndex?: number } = {},
   ): Promise<SapGuiSession> {
     const { connectionIndex = 0, sessionIndex = 0, ...sessionOptions } = options;
-    await adapterStep('sap-gui', 'attach', () => transport.request({ op: 'attach', connectionIndex, sessionIndex }), {
-      details: { connectionIndex, sessionIndex },
-    });
+    await adapterStep(
+      'sap-gui',
+      'attach',
+      () => transport.request({ op: 'attach', connectionIndex, sessionIndex }),
+      {
+        details: { connectionIndex, sessionIndex },
+      },
+    );
     const session = new SapGuiSession(transport, sessionOptions);
     await session.refreshContext();
     return session;
@@ -173,9 +230,14 @@ export class SapGuiSession implements Adapter {
     options: SapGuiSessionOptions & { logonPath?: string; connectionString?: string } = {},
   ): Promise<SapGuiSession> {
     const { logonPath, connectionString, ...sessionOptions } = options;
-    await adapterStep('sap-gui', 'open connection', () => transport.request({ op: 'open', connectionName, connectionString, logonPath }), {
-      details: { connectionName: connectionString ? '(connection string)' : connectionName },
-    });
+    await adapterStep(
+      'sap-gui',
+      'open connection',
+      () => transport.request({ op: 'open', connectionName, connectionString, logonPath }),
+      {
+        details: { connectionName: connectionString ? '(connection string)' : connectionName },
+      },
+    );
     const session = new SapGuiSession(transport, sessionOptions);
     await session.refreshContext();
     return session;
@@ -206,7 +268,11 @@ export class SapGuiSession implements Adapter {
       calm = busy ? 0 : calm + 1;
       if (calm >= stablePolls) return;
       if (Date.now() >= deadline) {
-        throw new AdapterError('sap-gui', 'waitUntilIdle', `SAP GUI was still busy after ${timeoutMs}ms`);
+        throw new AdapterError(
+          'sap-gui',
+          'waitUntilIdle',
+          `SAP GUI was still busy after ${timeoutMs}ms`,
+        );
       }
       await sleep(calm > 0 ? Math.min(this.pollMs, CONFIRM_GAP_MS) : this.pollMs);
     }
@@ -234,17 +300,28 @@ export class SapGuiSession implements Adapter {
         break;
       }
     }
-    const siblings = (await this.transport.request({ op: 'children', id: nearest }).catch(() => [])) as SapGuiChild[];
+    const siblings = (await this.transport
+      .request({ op: 'children', id: nearest })
+      .catch(() => [])) as SapGuiChild[];
     const statusBar = await this.statusBarText().catch(() => '');
     const where = await this.refreshContext();
-    return new SapGuiElementNotFoundError(id, waitedMs, nearest, siblings, statusBar, undefined, where);
+    return new SapGuiElementNotFoundError(
+      id,
+      waitedMs,
+      nearest,
+      siblings,
+      statusBar,
+      undefined,
+      where,
+    );
   }
 
   private async ready(id: string): Promise<void> {
     // Before a step one quiet reading is enough; the settle check that matters is after a round trip (see call()).
     await this.waitUntilIdle(this.timeoutMs, 1);
     // A step aimed AT a pop-up (wnd[1]...) must not have that pop-up taken away from it by a handler.
-    if (this.popupHandlers.length > 0 && !this.handlingPopup && !/^wnd\[[1-9]/.test(id)) await this.dismissPopups();
+    if (this.popupHandlers.length > 0 && !this.handlingPopup && !/^wnd\[[1-9]/.test(id))
+      await this.dismissPopups();
     await this.waitFor(id);
   }
 
@@ -256,7 +333,8 @@ export class SapGuiSession implements Adapter {
         return await attempt();
       } catch (error) {
         const transient = error instanceof SapGuiTransportError && error.code === 'NOT_FOUND';
-        if (!transient || Date.now() >= deadline) throw transient ? await this.notFound(id, this.timeoutMs) : error;
+        if (!transient || Date.now() >= deadline)
+          throw transient ? await this.notFound(id, this.timeoutMs) : error;
         await sleep(this.pollMs);
         await this.waitUntilIdle().catch(() => undefined);
       }
@@ -266,17 +344,45 @@ export class SapGuiSession implements Adapter {
   // ---------------------------------------------------------- generic access
 
   /** One logged, timed, journaled step. */
-  private async step<T>(label: string, id: string, details: Record<string, unknown>, action: () => Promise<T>, level: 'info' | 'debug' = 'info'): Promise<T> {
+  private async step<T>(
+    label: string,
+    id: string,
+    details: Record<string, unknown>,
+    action: () => Promise<T>,
+    level: 'info' | 'debug' = 'info',
+  ): Promise<T> {
     const startedAt = Date.now();
-    const where = this.lastContext ? { tx: this.lastContext.transaction, program: this.lastContext.program, screen: this.lastContext.screen } : {};
+    const where = this.lastContext
+      ? {
+          tx: this.lastContext.transaction,
+          program: this.lastContext.program,
+          screen: this.lastContext.screen,
+        }
+      : {};
     this.roundTripped = false;
     try {
       const result = await adapterStep(this.name, label, action, { level, details });
       const serverMs = this.roundTripped ? this.lastContext?.responseMs : undefined;
-      this.record({ at: startedAt, label, id, ms: Date.now() - startedAt, ok: true, ...where, ...(serverMs !== undefined ? { serverMs } : {}) });
+      this.record({
+        at: startedAt,
+        label,
+        id,
+        ms: Date.now() - startedAt,
+        ok: true,
+        ...where,
+        ...(serverMs !== undefined ? { serverMs } : {}),
+      });
       return result;
     } catch (error) {
-      this.record({ at: startedAt, label, id, ms: Date.now() - startedAt, ok: false, error: error instanceof Error ? error.message : String(error), ...where });
+      this.record({
+        at: startedAt,
+        label,
+        id,
+        ms: Date.now() - startedAt,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        ...where,
+      });
       throw error;
     }
   }
@@ -294,13 +400,20 @@ export class SapGuiSession implements Adapter {
       async () => {
         await this.ready(id);
         const { via, name } = parseMemberPath(prop);
-        return (await this.withRetry(id, () => this.transport.request({ op: 'get', id, prop: name, via }))) as T;
+        return (await this.withRetry(id, () =>
+          this.transport.request({ op: 'get', id, prop: name, via }),
+        )) as T;
       },
       'debug',
     );
   }
 
-  async set(id: string, prop: string, value: SapGuiValue, options: { secret?: boolean } = {}): Promise<void> {
+  async set(
+    id: string,
+    prop: string,
+    value: SapGuiValue,
+    options: { secret?: boolean } = {},
+  ): Promise<void> {
     await this.step(
       `set ${prop}`,
       id,
@@ -308,7 +421,9 @@ export class SapGuiSession implements Adapter {
       async () => {
         await this.ready(id);
         const { via, name } = parseMemberPath(prop);
-        await this.withRetry(id, () => this.transport.request({ op: 'set', id, prop: name, value, via }));
+        await this.withRetry(id, () =>
+          this.transport.request({ op: 'set', id, prop: name, value, via }),
+        );
       },
     );
   }
@@ -317,7 +432,9 @@ export class SapGuiSession implements Adapter {
     return this.step(method, id, { id, args: args.length > 0 ? args : undefined }, async () => {
       await this.ready(id);
       const { via, name } = parseMemberPath(method);
-      const result = await this.withRetry(id, () => this.transport.request({ op: 'call', id, method: name, args, via }));
+      const result = await this.withRetry(id, () =>
+        this.transport.request({ op: 'call', id, method: name, args, via }),
+      );
       if (SERVER_ROUND_TRIP_METHODS.has(name.toLowerCase())) {
         await this.waitUntilIdle();
         await this.refreshContext();
@@ -326,6 +443,36 @@ export class SapGuiSession implements Adapter {
       }
       return result;
     });
+  }
+
+  // ------------------------------------------------- locator drift
+
+  /** Called when a fallback found a control the primary id could not. Returns the id to use, or throws in 'fail' mode. */
+  reportDrift(expected: string, usedFallback: string, foundId: string): string {
+    const item: LocatorDrift = {
+      expected,
+      usedFallback,
+      foundId,
+      tx: this.lastContext?.transaction,
+      screen: this.lastContext?.screen,
+    };
+    this.drift.push(item);
+    log.warn(
+      `[sap-gui] LOCATOR DRIFT: ${expected} is gone; found via ${usedFallback} at ${foundId}${item.tx ? ` (transaction ${item.tx}, screen ${item.screen})` : ''} - update the page object`,
+    );
+    if (this.fallbackMode === 'fail') {
+      throw new AdapterError(
+        'sap-gui',
+        'locate',
+        `locator drift: ${expected} is no longer on the screen, but ${usedFallback} finds the control at "${foundId}". Update the page object to the new id (SAP_GUI_FALLBACKS=report would have continued the run).`,
+      );
+    }
+    return foundId;
+  }
+
+  /** Every fallback that had to be used in this test. */
+  get driftItems(): readonly LocatorDrift[] {
+    return this.drift;
   }
 
   // ------------------------------------------------- where SAP is
@@ -346,7 +493,9 @@ export class SapGuiSession implements Adapter {
     try {
       this.lastContext = await this.context();
     } catch (error) {
-      log.debug(`[sap-gui] could not read the session context: ${error instanceof Error ? error.message : String(error)}`);
+      log.debug(
+        `[sap-gui] could not read the session context: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     return this.lastContext;
   }
@@ -359,23 +508,41 @@ export class SapGuiSession implements Adapter {
   }
 
   /** Controls whose text contains `text` (case-insensitive; `exact` for the whole text) - buttons, labels, tabs, menu entries. */
-  getByText(text: string, options: { exact?: boolean; root?: string; type?: string } = {}): SapLocator {
-    return this.byCriteria({ root: options.root ?? 'wnd[0]', text, exact: options.exact, type: options.type }, `text "${text}"`);
+  getByText(
+    text: string,
+    options: { exact?: boolean; root?: string; type?: string } = {},
+  ): SapLocator {
+    return this.byCriteria(
+      { root: options.root ?? 'wnd[0]', text, exact: options.exact, type: options.type },
+      `text "${text}"`,
+    );
   }
 
   /** Controls whose tooltip contains `tooltip` - toolbar buttons are usually found this way ("Save", "Back"). */
-  getByTooltip(tooltip: string, options: { exact?: boolean; root?: string; type?: string } = {}): SapLocator {
-    return this.byCriteria({ root: options.root ?? 'wnd[0]', tooltip, exact: options.exact, type: options.type }, `tooltip "${tooltip}"`);
+  getByTooltip(
+    tooltip: string,
+    options: { exact?: boolean; root?: string; type?: string } = {},
+  ): SapLocator {
+    return this.byCriteria(
+      { root: options.root ?? 'wnd[0]', tooltip, exact: options.exact, type: options.type },
+      `tooltip "${tooltip}"`,
+    );
   }
 
   /** The input field next to the label the user sees: getByLabel('Sold-To Party'). */
   getByLabel(label: string, options: { exact?: boolean; root?: string } = {}): SapLocator {
-    return this.byCriteria({ root: options.root ?? 'wnd[0]', label, exact: options.exact }, `label "${label}"`);
+    return this.byCriteria(
+      { root: options.root ?? 'wnd[0]', label, exact: options.exact },
+      `label "${label}"`,
+    );
   }
 
   /** Controls of one SAP class, e.g. getByType('GuiButton'). */
   getByType(type: string, options: { name?: string; root?: string } = {}): SapLocator {
-    return this.byCriteria({ root: options.root ?? 'wnd[0]', type, name: options.name }, `type ${type}${options.name ? ` named ${options.name}` : ''}`);
+    return this.byCriteria(
+      { root: options.root ?? 'wnd[0]', type, name: options.name },
+      `type ${type}${options.name ? ` named ${options.name}` : ''}`,
+    );
   }
 
   private byCriteria(criteria: FindCriteria, description: string): SapLocator {
@@ -405,7 +572,9 @@ export class SapGuiSession implements Adapter {
   /** What a control is (type, text, tooltip, read-only?) in one round trip. Waits for it to exist. */
   async info(id: string): Promise<ControlInfo> {
     await this.ready(id);
-    return (await this.withRetry(id, () => this.transport.request({ op: 'info', id }))) as ControlInfo;
+    return (await this.withRetry(id, () =>
+      this.transport.request({ op: 'info', id }),
+    )) as ControlInfo;
   }
 
   // ------------------------------------------------------ pop-up handlers
@@ -421,8 +590,18 @@ export class SapGuiSession implements Adapter {
    *
    * @returns a function that removes the handler again.
    */
-  onPopup(name: string, match: PopupMatch, handle: (sap: SapGuiSession) => Promise<void>, options: { times?: number } = {}): () => void {
-    const handler: PopupHandler = { name, match, handle, remaining: options.times ?? Number.POSITIVE_INFINITY };
+  onPopup(
+    name: string,
+    match: PopupMatch,
+    handle: (sap: SapGuiSession) => Promise<void>,
+    options: { times?: number } = {},
+  ): () => void {
+    const handler: PopupHandler = {
+      name,
+      match,
+      handle,
+      remaining: options.times ?? Number.POSITIVE_INFINITY,
+    };
     this.popupHandlers.push(handler);
     return () => {
       const index = this.popupHandlers.indexOf(handler);
@@ -440,12 +619,21 @@ export class SapGuiSession implements Adapter {
     this.handlingPopup = true;
     try {
       for (let round = 0; round < 5 && (await this.exists('wnd[1]')); round++) {
-        const title = String((await this.transport.request({ op: 'get', id: 'wnd[1]', prop: 'text' }).catch(() => '')) ?? '');
+        const title = String(
+          (await this.transport
+            .request({ op: 'get', id: 'wnd[1]', prop: 'text' })
+            .catch(() => '')) ?? '',
+        );
         let chosen: PopupHandler | undefined;
         for (const handler of this.popupHandlers) {
           if (handler.remaining <= 0) continue;
-          const titleOk = handler.match.title === undefined || (typeof handler.match.title === 'string' ? title.toLowerCase().includes(handler.match.title.toLowerCase()) : handler.match.title.test(title));
-          const containsOk = handler.match.contains === undefined || (await this.exists(handler.match.contains));
+          const titleOk =
+            handler.match.title === undefined ||
+            (typeof handler.match.title === 'string'
+              ? title.toLowerCase().includes(handler.match.title.toLowerCase())
+              : handler.match.title.test(title));
+          const containsOk =
+            handler.match.contains === undefined || (await this.exists(handler.match.contains));
           if (titleOk && containsOk) {
             chosen = handler;
             break;
@@ -471,7 +659,10 @@ export class SapGuiSession implements Adapter {
     const time = (at: number) => new Date(at).toISOString().slice(11, 23);
     return this.journal
       .slice(-limit)
-      .map((e) => `${time(e.at)}  ${e.ok ? 'ok  ' : 'FAIL'}  ${(e.tx ?? '').padEnd(14)} ${e.label.padEnd(24)} ${e.id.padEnd(48)} ${String(e.ms).padStart(5)}ms${e.error ? `   ${e.error}` : ''}`)
+      .map(
+        (e) =>
+          `${time(e.at)}  ${e.ok ? 'ok  ' : 'FAIL'}  ${(e.tx ?? '').padEnd(14)} ${e.label.padEnd(24)} ${e.id.padEnd(48)} ${String(e.ms).padStart(5)}ms${e.error ? `   ${e.error}` : ''}`,
+      )
       .join('\n');
   }
 
@@ -481,13 +672,18 @@ export class SapGuiSession implements Adapter {
 
   /** Screenshot of the SAP window, kept and attached to the test report under `label`. Returns the file, or undefined if SAP could not take it. */
   async evidence(label: string): Promise<string | undefined> {
-    const file = path.join(os.tmpdir(), `sap-evidence-${process.pid}-${Date.now()}-${++this.evidenceCount}.png`);
+    const file = path.join(
+      os.tmpdir(),
+      `sap-evidence-${process.pid}-${Date.now()}-${++this.evidenceCount}.png`,
+    );
     try {
       await this.screenshot(file);
       this.evidenceFiles.push({ label, file });
       return file;
     } catch (error) {
-      log.warn(`[sap-gui] could not capture evidence "${label}": ${error instanceof Error ? error.message : String(error)}`);
+      log.warn(
+        `[sap-gui] could not capture evidence "${label}": ${error instanceof Error ? error.message : String(error)}`,
+      );
       return undefined;
     }
   }
@@ -501,6 +697,7 @@ export class SapGuiSession implements Adapter {
     this.journal.length = 0;
     this.evidenceFiles.length = 0;
     this.popupHandlers.length = 0;
+    this.drift.length = 0;
   }
 
   // ------------------------------------------------- the recorder's vocabulary
@@ -570,7 +767,10 @@ export class SapGuiSession implements Adapter {
   /** The status bar message and its type: S success, E error, W warning, I information, A abort. */
   async statusBar(): Promise<{ text: string; type: string }> {
     if (!(await this.exists('wnd[0]/sbar'))) return { text: '', type: '' };
-    const [text, type] = await Promise.all([this.peekProp('wnd[0]/sbar', 'text'), this.peekProp('wnd[0]/sbar', 'messageType')]);
+    const [text, type] = await Promise.all([
+      this.peekProp('wnd[0]/sbar', 'text'),
+      this.peekProp('wnd[0]/sbar', 'messageType'),
+    ]);
     return { text: String(text ?? ''), type: String(type ?? '') };
   }
 
@@ -613,8 +813,15 @@ export class SapGuiSession implements Adapter {
   async logoff(): Promise<void> {
     await this.step('logoff', '', {}, async () => {
       if (!(await this.exists('wnd[0]/tbar[0]/okcd'))) return;
-      await this.transport.request({ op: 'set', id: 'wnd[0]/tbar[0]/okcd', prop: 'text', value: '/nex' });
-      await this.transport.request({ op: 'call', id: 'wnd[0]', method: 'sendVKey', args: [0] }).catch(() => undefined);
+      await this.transport.request({
+        op: 'set',
+        id: 'wnd[0]/tbar[0]/okcd',
+        prop: 'text',
+        value: '/nex',
+      });
+      await this.transport
+        .request({ op: 'call', id: 'wnd[0]', method: 'sendVKey', args: [0] })
+        .catch(() => undefined);
     });
   }
 
@@ -626,7 +833,12 @@ export class SapGuiSession implements Adapter {
   /** Screenshot of the main window, for failure evidence. */
   async screenshot(filePath: string): Promise<void> {
     await adapterStep(this.name, 'screenshot', async () => {
-      await this.transport.request({ op: 'call', id: 'wnd[0]', method: 'HardCopy', args: [filePath, 'PNG'] });
+      await this.transport.request({
+        op: 'call',
+        id: 'wnd[0]',
+        method: 'HardCopy',
+        args: [filePath, 'PNG'],
+      });
     });
   }
 }

@@ -25,6 +25,13 @@ export function markdownReport(records: TestInsight[], options: ReportOptions = 
     lines.push('## Expected transactions', '', missing.length === 0 ? `All ${options.expected.length} expected transaction(s) were exercised.` : `**Not exercised (${missing.length} of ${options.expected.length}):** ${missing.join(', ')}`, '');
   }
 
+  const drift = records.flatMap((r) => (r.drift ?? []).map((d) => ({ ...d, test: r.test })));
+  if (drift.length > 0) {
+    lines.push('## Locator drift', '', 'These controls were found by a fallback because their usual id is gone - update the page objects:', '', '| Expected id | Found at | Transaction | Test |', '|---|---|---|---|');
+    for (const d of drift) lines.push(`| ${d.expected} | ${d.foundId} | ${d.tx ?? '-'} | ${d.test} |`);
+    lines.push('');
+  }
+
   const stats = timings(records);
   const slowest = [...stats].sort((a, b) => b.medianMs - a.medianMs).slice(0, 10);
   lines.push('## Slowest steps (median)', '', '| Transaction | Step | Samples | Median | p90 | Max | SAP server median |', '|---|---|---|---|---|---|---|');

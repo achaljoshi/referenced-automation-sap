@@ -5,7 +5,8 @@ import type { ControlInfo, FindCriteria, SapGuiValue } from './types';
 type Selector =
   | { kind: 'id'; id: string }
   | { kind: 'find'; criteria: FindCriteria; nth?: number | 'last' }
-  | { kind: 'child'; parent: SapLocator; relative: string };
+  | { kind: 'child'; parent: SapLocator; relative: string }
+  | { kind: 'fallback'; primary: SapLocator; alternates: SapLocator[] };
 
 const TEXT_LIKE_BUTTON_TYPES = new Set(['GuiButton']);
 const SELECT_TYPES = new Set(['GuiTab', 'GuiMenu', 'GuiRadioButton']);
@@ -58,7 +59,30 @@ export class SapLocator {
 
   /** A control inside this one, by the id fragment below it (`txtRV45A-KWMENG[3,0]` inside a table control). */
   locator(relativeId: string): SapLocator {
-    return new SapLocator(this.sap, { kind: 'child', parent: this, relative: relativeId }, `${this.description} > ${relativeId}`);
+    return new SapLocator(
+      this.sap,
+      { kind: 'child', parent: this, relative: relativeId },
+      `${this.description} > ${relativeId}`,
+    );
+  }
+
+  /**
+   * Fall back to other ways of finding the same control if this one is not on the screen - the
+   * technical id changed after a SAP release or customising change, but the label is still there:
+   *
+   *   sap.locator('wnd[0]/usr/ctxtKUAGV-KUNNR').orElse(sap.getByLabel('Sold-To Party'))
+   *
+   * This is NOT silent self-healing. The primary gets a grace period first (a slow screen is not a
+   * changed id). If a fallback is used the test continues but the drift is recorded - attached to
+   * the report with the id to put in the page object - and `SAP_GUI_FALLBACKS=fail` turns it into
+   * a failure that names the new id (for a nightly drift check), `off` ignores fallbacks.
+   */
+  orElse(...alternates: SapLocator[]): SapLocator {
+    return new SapLocator(
+      this.sap,
+      { kind: 'fallback', primary: this, alternates },
+      `${this.description} (or ${alternates.map(String).join(' / ')})`,
+    );
   }
 
   // ----------------------------------------------------------- resolution
@@ -68,12 +92,69 @@ export class SapLocator {
     const s = this.selector;
     if (s.kind === 'id') return s.id;
     if (s.kind === 'child') return `${await s.parent.id(timeoutMs)}/${s.relative}`;
+    if (s.kind === 'fallback') return this.resolveWithFallback(s, timeoutMs);
 
     await this.sap.settle();
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const ids = await this.sap.findIds(s.criteria);
       if (ids.length > 0) return this.pick(ids, s);
+      if (Date.now() >= deadline) throw await this.notFound(timeoutMs);
+      await new Promise((resolve) => setTimeout(resolve, this.sap.pollMs));
+    }
+  }
+
+  /** Where this locator points right now, without waiting; undefined if nothing matches. Throws if the match is ambiguous. */
+  async peekId(): Promise<string | undefined> {
+    const s = this.selector;
+    if (s.kind === 'id') return (await this.sap.exists(s.id)) ? s.id : undefined;
+    if (s.kind === 'child') {
+      const parent = await s.parent.peekId();
+      if (!parent) return undefined;
+      const id = `${parent}/${s.relative}`;
+      return (await this.sap.exists(id)) ? id : undefined;
+    }
+    if (s.kind === 'find') {
+      const ids = await this.sap.findIds(s.criteria);
+      return ids.length === 0 ? undefined : this.pick(ids, s);
+    }
+    const primary = await s.primary.peekId();
+    if (primary) return primary;
+    if (this.sap.fallbackMode === 'off') return undefined;
+    for (const alternate of s.alternates) {
+      try {
+        const found = await alternate.peekId();
+        if (found) return found;
+      } catch {
+        /* an ambiguous alternate is not a usable fallback - try the next */
+      }
+    }
+    return undefined;
+  }
+
+  private async resolveWithFallback(
+    s: Extract<Selector, { kind: 'fallback' }>,
+    timeoutMs: number,
+  ): Promise<string> {
+    await this.sap.settle();
+    const started = Date.now();
+    const deadline = started + timeoutMs;
+    // The primary gets time to appear before a fallback may be used: a slow screen is not a changed id.
+    const grace = Math.min(3_000, Math.floor(timeoutMs / 3));
+    for (;;) {
+      const primary = await s.primary.peekId();
+      if (primary) return primary;
+      if (this.sap.fallbackMode !== 'off' && Date.now() - started >= grace) {
+        for (const alternate of s.alternates) {
+          let found: string | undefined;
+          try {
+            found = await alternate.peekId();
+          } catch {
+            continue;
+          }
+          if (found) return this.sap.reportDrift(String(s.primary), String(alternate), found);
+        }
+      }
       if (Date.now() >= deadline) throw await this.notFound(timeoutMs);
       await new Promise((resolve) => setTimeout(resolve, this.sap.pollMs));
     }
@@ -95,7 +176,12 @@ export class SapLocator {
     }
     const index = s.nth === 'last' ? clean.length - 1 : s.nth;
     const found = clean[index];
-    if (found === undefined) throw new AdapterError('sap-gui', 'locate', `${this.description}: there is no match number ${s.nth} (only ${clean.length} found)`);
+    if (found === undefined)
+      throw new AdapterError(
+        'sap-gui',
+        'locate',
+        `${this.description}: there is no match number ${s.nth} (only ${clean.length} found)`,
+      );
     return found;
   }
 
@@ -135,7 +221,8 @@ export class SapLocator {
     const id = await this.id();
     const count = Number(await this.sap.get(id, 'entries.count'));
     const values: string[] = [];
-    for (let i = 0; i < count; i++) values.push(String(await this.sap.get(id, `entries.item(${i}).value`)));
+    for (let i = 0; i < count; i++)
+      values.push(String(await this.sap.get(id, `entries.item(${i}).value`)));
     return values;
   }
 
@@ -160,20 +247,13 @@ export class SapLocator {
   async count(): Promise<number> {
     const s = this.selector;
     if (s.kind === 'find') return (await this.sap.findIds(s.criteria)).length;
-    return (await this.sap.exists(await this.id())) ? 1 : 0;
+    return (await this.peekId()) ? 1 : 0;
   }
 
   /** A property right now without waiting, `undefined` if the control is not there. This is what the retrying assertions poll. */
   async snapshot(): Promise<{ info: ControlInfo; id: string } | undefined> {
-    const s = this.selector;
-    let id: string;
-    if (s.kind === 'find') {
-      const ids = await this.sap.findIds(s.criteria);
-      if (ids.length === 0) return undefined;
-      id = this.pick(ids, s);
-    } else {
-      id = await this.id();
-    }
+    const id = await this.peekId();
+    if (!id) return undefined;
     const info = await this.sap.peekInfo(id);
     return info ? { info, id } : undefined;
   }
@@ -182,14 +262,20 @@ export class SapLocator {
     return this.sap.get(await this.id(), prop);
   }
 
-  async waitFor(options: { state?: 'attached' | 'detached'; timeout?: number } = {}): Promise<void> {
+  async waitFor(
+    options: { state?: 'attached' | 'detached'; timeout?: number } = {},
+  ): Promise<void> {
     const timeout = options.timeout ?? this.sap.timeoutMs;
     const wantPresent = (options.state ?? 'attached') === 'attached';
     await this.sap.settle();
     const deadline = Date.now() + timeout;
     while ((await this.count()) > 0 !== wantPresent) {
       if (Date.now() >= deadline) {
-        throw new AdapterError('sap-gui', 'waitFor', `${this.description} was ${wantPresent ? 'not on the screen' : 'still on the screen'} after ${timeout}ms`);
+        throw new AdapterError(
+          'sap-gui',
+          'waitFor',
+          `${this.description} was ${wantPresent ? 'not on the screen' : 'still on the screen'} after ${timeout}ms`,
+        );
       }
       await new Promise((resolve) => setTimeout(resolve, this.sap.pollMs));
     }
@@ -206,8 +292,10 @@ export class SapLocator {
     const { type } = await this.sap.info(id);
     if (TEXT_LIKE_BUTTON_TYPES.has(type)) return void (await this.sap.call(id, 'press'));
     if (SELECT_TYPES.has(type)) return void (await this.sap.call(id, 'select'));
-    if (type === 'GuiCheckBox') return this.sap.set(id, 'selected', !(await this.sap.get(id, 'selected')));
-    if (/^Gui(C?TextField|PasswordField|Textedit|ComboBox|OkCodeField)$/.test(type)) return void (await this.sap.call(id, 'setFocus'));
+    if (type === 'GuiCheckBox')
+      return this.sap.set(id, 'selected', !(await this.sap.get(id, 'selected')));
+    if (/^Gui(C?TextField|PasswordField|Textedit|ComboBox|OkCodeField)$/.test(type))
+      return void (await this.sap.call(id, 'setFocus'));
     throw new AdapterError(
       'sap-gui',
       'click',
@@ -220,20 +308,35 @@ export class SapLocator {
   async fill(value: string, options: { checkMaxLength?: boolean } = {}): Promise<void> {
     const id = await this.id();
     const { type, changeable } = await this.sap.info(id);
-    if (!changeable) throw new AdapterError('sap-gui', 'fill', `${this.description} (${type} ${id}) is read-only - SAP does not let anyone type there`);
+    if (!changeable)
+      throw new AdapterError(
+        'sap-gui',
+        'fill',
+        `${this.description} (${type} ${id}) is read-only - SAP does not let anyone type there`,
+      );
 
-    if (type === 'GuiCheckBox' || type === 'GuiRadioButton') return this.setChecked(/^(true|x|1|yes)$/i.test(value));
+    if (type === 'GuiCheckBox' || type === 'GuiRadioButton')
+      return this.setChecked(/^(true|x|1|yes)$/i.test(value));
     if (type === 'GuiComboBox') {
       try {
         return await this.sap.set(id, 'value', value);
       } catch (error) {
-        throw new AdapterError('sap-gui', 'fill', `"${value}" is not an option of the drop-down ${this.description} (${id})`, { cause: error });
+        throw new AdapterError(
+          'sap-gui',
+          'fill',
+          `"${value}" is not an option of the drop-down ${this.description} (${id})`,
+          { cause: error },
+        );
       }
     }
     if (options.checkMaxLength) {
       const max = Number(await this.sap.peekProp(id, 'maxLength').catch(() => 0));
       if (max > 0 && value.length > max) {
-        throw new AdapterError('sap-gui', 'fill', `"${value}" is ${value.length} characters but ${this.description} (${id}) allows ${max}`);
+        throw new AdapterError(
+          'sap-gui',
+          'fill',
+          `"${value}" is ${value.length} characters but ${this.description} (${id}) allows ${max}`,
+        );
       }
     }
     await this.sap.set(id, 'text', value, { secret: type === 'GuiPasswordField' });

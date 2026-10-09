@@ -21,6 +21,8 @@ export interface TestInsight {
   client?: string;
   user?: string;
   steps: StepRecord[];
+  /** Controls found by a fallback because their usual id was gone. */
+  drift?: Array<{ expected: string; foundId: string; tx?: string; screen?: string }>;
 }
 
 export const DEFAULT_INSIGHTS_DIR = 'test-results/sap-insights';
