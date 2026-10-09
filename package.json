@@ -44,7 +44,8 @@
     "contracts": "node dist/cli/contracts.js",
     "convert:pages": "node dist/cli/convertVbs.js recordings --out tests/sapgui --test-import ./support/sapTest --page-objects",
     "convert:data": "node dist/cli/convertVbs.js recordings --out tests/sapgui --test-import ./support/sapTest --data",
-    "conformance": "node dist/cli/doctor.js --conformance"
+    "conformance": "node dist/cli/doctor.js --conformance",
+    "security": "automation-audit-gate && automation-scan-secrets"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.62.1 <2.0.0"
