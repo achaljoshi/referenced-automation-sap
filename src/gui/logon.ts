@@ -44,8 +44,10 @@ export async function isOnLogonScreen(sap: SapGuiSession): Promise<boolean> {
 export async function logon(sap: SapGuiSession, credentials: SapCredentials = {}): Promise<void> {
   const env = loadEnv();
   const client = credentials.client ?? env.getOptional('SAP_CLIENT');
-  const user = credentials.user ?? env.getOptional('SAP_USER');
-  const password = credentials.password ?? (await resolveSecret('SAP_PASSWORD'));
+  const user = credentials.user ?? sap.assignedUser ?? env.getOptional('SAP_USER');
+  // A pooled user may have its own password (SAP_PASSWORD_<USER>); otherwise the shared SAP_PASSWORD applies.
+  const password =
+    credentials.password ?? (sap.assignedUser ? await resolveSecret(`SAP_PASSWORD_${sap.assignedUser}`) : undefined) ?? (await resolveSecret('SAP_PASSWORD'));
   const language = credentials.language ?? env.getOptional('SAP_LANGUAGE');
 
   if (!user || !password) {

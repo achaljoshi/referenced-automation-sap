@@ -7,6 +7,7 @@ import { appendCreated, DEFAULT_DATA_DIR, formatCreated, SapDataRegistry } from 
 import { createSampleSapSystem } from './fakeSapGui';
 import { PowerShellTransport } from './powershellTransport';
 import { appendInsight, DEFAULT_INSIGHTS_DIR } from '../insights';
+import { SapUserPool, type UserLease } from './pool';
 import { SapGuiSession } from './session';
 import type { SapGuiTransport } from './types';
 
@@ -35,6 +36,7 @@ const DEFAULT_LOGON_PATH = 'C:\\Program Files (x86)\\SAP\\FrontEnd\\SAPgui\\sapl
 export class SapConnection {
   private session?: SapGuiSession;
   private opened = false;
+  private lease?: UserLease;
 
   constructor(
     private readonly options: Pick<SapGuiOptions, 'sapGuiMode' | 'sapGuiTransport' | 'sapGuiReuse'>,
@@ -54,7 +56,9 @@ export class SapConnection {
   }
 
   get reuse(): 'worker' | 'test' {
-    return this.options.sapGuiReuse ?? (this.env.get('SAP_GUI_REUSE', 'worker') as 'worker' | 'test');
+    return (
+      this.options.sapGuiReuse ?? (this.env.get('SAP_GUI_REUSE', 'worker') as 'worker' | 'test')
+    );
   }
 
   /** Record what each test did in SAP (transactions, step timings) for `sap-gui-insights`. SAP_GUI_INSIGHTS=off disables. */
@@ -86,9 +90,14 @@ export class SapConnection {
     const session = this.session;
     this.session = undefined;
     if (!session) return;
-    if (this.opened) await session.logoff().catch((error: unknown) => log.warn(`[sap-gui] logoff failed: ${String(error)}`));
+    if (this.opened)
+      await session
+        .logoff()
+        .catch((error: unknown) => log.warn(`[sap-gui] logoff failed: ${String(error)}`));
     this.opened = false;
     await session.close().catch(() => undefined);
+    this.lease?.release();
+    this.lease = undefined;
   }
 
   private async connect(): Promise<SapGuiSession> {
@@ -97,15 +106,59 @@ export class SapConnection {
     const timeoutMs = env.getInt('SAP_GUI_TIMEOUT_MS', 30_000);
     const evidence = this.evidence === 'steps' ? 'steps' : 'off';
     // The simulator always starts at the logon screen, like mode=open does on a real system.
-    const mode = simulate ? 'attach' : (this.options.sapGuiMode ?? (env.get('SAP_GUI_MODE', 'attach') as 'attach' | 'open'));
+    const mode = simulate
+      ? 'attach'
+      : this.options.sapGuiMode ?? (env.get('SAP_GUI_MODE', 'attach') as 'attach' | 'open');
 
-    const transport =
-      (await this.options.sapGuiTransport?.()) ??
-      (simulate
-        ? createSampleSapSystem({ user: env.get('SAP_USER', 'TESTUSER'), password: env.get('SAP_PASSWORD', 'correct-horse'), client: env.get('SAP_CLIENT', '100'), transitionDelayMs: 100 })
-        : undefined) ??
-      (await PowerShellTransport.start({ powershellPath: env.getOptional('SAP_GUI_POWERSHELL') }));
+    // Lease a user BEFORE starting the bridge: a pool timeout must not leave a PowerShell process behind.
+    const poolUsers = env.getList('SAP_USER_POOL');
+    if (poolUsers.length > 0 && mode !== 'open' && !simulate) {
+      log.warn(
+        '[sap-gui] SAP_USER_POOL is ignored in attach mode (you are using a session someone already logged on) - use SAP_GUI_MODE=open',
+      );
+    }
+    if (poolUsers.length > 0 && (mode === 'open' || simulate)) {
+      const pool = new SapUserPool(poolUsers, {
+        scope: env.get('SAP_GUI_POOL_SCOPE', env.get('SAP_GUI_CONNECTION_NAME', 'default')),
+        owner: `worker ${process.env.TEST_WORKER_INDEX ?? '?'}`,
+        dir: env.getOptional('SAP_GUI_POOL_DIR'),
+      });
+      this.lease = await pool.lease(env.getInt('SAP_GUI_POOL_TIMEOUT_MS', 120_000));
+    }
 
+    let transport: SapGuiTransport | undefined;
+    try {
+      transport =
+        (await this.options.sapGuiTransport?.()) ??
+        (simulate
+          ? createSampleSapSystem({
+              user: env.get('SAP_USER', 'TESTUSER'),
+              password: env.get('SAP_PASSWORD', 'correct-horse'),
+              client: env.get('SAP_CLIENT', '100'),
+              transitionDelayMs: 100,
+            })
+          : undefined) ??
+        (await PowerShellTransport.start({
+          powershellPath: env.getOptional('SAP_GUI_POWERSHELL'),
+        }));
+      const session = await this.openSession(mode, transport, env, timeoutMs, evidence);
+      if (this.lease) session.assignedUser = this.lease.user;
+      return session;
+    } catch (error) {
+      await transport?.close().catch(() => undefined);
+      this.lease?.release();
+      this.lease = undefined;
+      throw error;
+    }
+  }
+
+  private async openSession(
+    mode: 'attach' | 'open',
+    transport: SapGuiTransport,
+    env: ReturnType<typeof loadEnv>,
+    timeoutMs: number,
+    evidence: 'off' | 'steps',
+  ): Promise<SapGuiSession> {
     if (mode === 'open') {
       this.opened = true;
       return SapGuiSession.open(transport, env.getOptional('SAP_GUI_CONNECTION_NAME') ?? '', {
@@ -153,7 +206,10 @@ export class SapConnection {
  * On a machine that isn't Windows the test is SKIPPED with the reason shown
  * in the report - never silently passed.
  */
-export const sapGuiTest = uiTest.extend<{ sap: SapGuiSession; sapData: SapDataRegistry }, SapGuiOptions & { sapConnection: SapConnection }>({
+export const sapGuiTest = uiTest.extend<
+  { sap: SapGuiSession; sapData: SapDataRegistry },
+  SapGuiOptions & { sapConnection: SapConnection }
+>({
   sapGuiMode: [undefined, { option: true, scope: 'worker' }],
   sapGuiTransport: [undefined, { option: true, scope: 'worker' }],
   sapGuiReuse: [undefined, { option: true, scope: 'worker' }],
@@ -175,12 +231,22 @@ export const sapGuiTest = uiTest.extend<{ sap: SapGuiSession; sapData: SapDataRe
 
     const session = await sapConnection.acquire();
     session.resetDiagnostics();
-    if (sapConnection.reuse === 'worker') await session.home().catch((error: unknown) => log.warn(`[sap-gui] could not return to the start screen: ${String(error)}`));
+    if (sapConnection.reuse === 'worker')
+      await session
+        .home()
+        .catch((error: unknown) =>
+          log.warn(`[sap-gui] could not return to the start screen: ${String(error)}`),
+        );
 
     try {
       await use(session);
     } finally {
-      await attachDiagnostics(session, testInfo, sapConnection.evidence, testInfo.status !== testInfo.expectedStatus);
+      await attachDiagnostics(
+        session,
+        testInfo,
+        sapConnection.evidence,
+        testInfo.status !== testInfo.expectedStatus,
+      );
       if (sapConnection.insights) recordInsight(session, testInfo, sapConnection.insightsDir);
       if (sapConnection.reuse === 'test') await sapConnection.dispose();
     }
@@ -201,7 +267,10 @@ export const sapGuiTest = uiTest.extend<{ sap: SapGuiSession; sapData: SapDataRe
     }
     try {
       appendCreated(registry.items, loadEnv().get('SAP_GUI_DATA_DIR', DEFAULT_DATA_DIR));
-      await testInfo.attach('sap-created-data', { body: formatCreated(registry.items), contentType: 'text/plain' });
+      await testInfo.attach('sap-created-data', {
+        body: formatCreated(registry.items),
+        contentType: 'text/plain',
+      });
     } catch (error) {
       log.warn(`[sap-gui] could not write the created-data audit list: ${String(error)}`);
     }
@@ -209,7 +278,11 @@ export const sapGuiTest = uiTest.extend<{ sap: SapGuiSession; sapData: SapDataRe
 });
 
 /** Appends this test's SAP activity to the insights file. Never throws. */
-function recordInsight(session: SapGuiSession, testInfo: { titlePath: string[]; status?: string; duration: number }, dir: string): void {
+function recordInsight(
+  session: SapGuiSession,
+  testInfo: { titlePath: string[]; status?: string; duration: number },
+  dir: string,
+): void {
   try {
     const where = session.currentContext;
     appendInsight(
@@ -220,25 +293,48 @@ function recordInsight(session: SapGuiSession, testInfo: { titlePath: string[]; 
         system: where?.system,
         client: where?.client,
         user: where?.user,
-        steps: session.steps.map((e) => ({ tx: e.tx ?? '', program: e.program, screen: e.screen, label: e.label, ms: e.ms, serverMs: e.serverMs, ok: e.ok })),
+        steps: session.steps.map((e) => ({
+          tx: e.tx ?? '',
+          program: e.program,
+          screen: e.screen,
+          label: e.label,
+          ms: e.ms,
+          serverMs: e.serverMs,
+          ok: e.ok,
+        })),
       },
       dir,
     );
   } catch (error) {
-    log.warn(`[sap-gui] could not record insights: ${error instanceof Error ? error.message : String(error)}`);
+    log.warn(
+      `[sap-gui] could not record insights: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
-export type Attacher = { attach(name: string, options: { body?: string; path?: string; contentType: string }): Promise<void> };
+export type Attacher = {
+  attach(
+    name: string,
+    options: { body?: string; path?: string; contentType: string },
+  ): Promise<void>;
+};
 
 /**
  * What goes into the report. Always: evidence you asked for with sap.evidence().
  * On failure (unless SAP_GUI_EVIDENCE=off): the step journal, the status bar text, a screenshot.
  * Never throws - it must not mask the real failure.
  */
-export async function attachDiagnostics(session: SapGuiSession, testInfo: Attacher, mode: 'off' | 'failure' | 'steps', failed: boolean): Promise<void> {
+export async function attachDiagnostics(
+  session: SapGuiSession,
+  testInfo: Attacher,
+  mode: 'off' | 'failure' | 'steps',
+  failed: boolean,
+): Promise<void> {
   for (const item of session.evidenceItems) {
-    if (fs.existsSync(item.file)) await testInfo.attach(`sap-evidence: ${item.label}`, { path: item.file, contentType: 'image/png' }).catch(() => undefined);
+    if (fs.existsSync(item.file))
+      await testInfo
+        .attach(`sap-evidence: ${item.label}`, { path: item.file, contentType: 'image/png' })
+        .catch(() => undefined);
   }
   if (!failed || mode === 'off') return;
 
@@ -252,19 +348,30 @@ export async function attachDiagnostics(session: SapGuiSession, testInfo: Attach
       .catch(() => undefined);
   }
   const journal = session.journalText();
-  if (journal) await testInfo.attach('sap-steps', { body: journal, contentType: 'text/plain' }).catch(() => undefined);
+  if (journal)
+    await testInfo
+      .attach('sap-steps', { body: journal, contentType: 'text/plain' })
+      .catch(() => undefined);
   try {
     const statusBar = await session.statusBarText();
-    await testInfo.attach('sap-status-bar', { body: statusBar || '(empty)', contentType: 'text/plain' });
+    await testInfo.attach('sap-status-bar', {
+      body: statusBar || '(empty)',
+      contentType: 'text/plain',
+    });
     log.error(`SAP status bar at failure: ${statusBar || '(empty)'}`);
   } catch (error) {
-    log.warn(`could not read the SAP status bar after failure: ${error instanceof Error ? error.message : String(error)}`);
+    log.warn(
+      `could not read the SAP status bar after failure: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   try {
     const file = path.join(os.tmpdir(), `sap-failure-${Date.now()}.png`);
     await session.screenshot(file);
-    if (fs.existsSync(file)) await testInfo.attach('sap-screenshot', { path: file, contentType: 'image/png' });
+    if (fs.existsSync(file))
+      await testInfo.attach('sap-screenshot', { path: file, contentType: 'image/png' });
   } catch (error) {
-    log.warn(`could not capture a SAP screenshot after failure: ${error instanceof Error ? error.message : String(error)}`);
+    log.warn(
+      `could not capture a SAP screenshot after failure: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }

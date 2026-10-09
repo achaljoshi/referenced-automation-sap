@@ -131,6 +131,8 @@ export class SapGuiSession implements Adapter {
   private readonly stablePolls: number;
   private readonly evidenceMode: 'off' | 'steps';
   private readonly trackContext: boolean;
+  /** The pooled SAP user this session was given (SAP_USER_POOL); `logon()` uses it. */
+  assignedUser?: string;
   private lastContext?: SapContext;
   private roundTripped = false;
   private readonly journal: JournalEntry[] = [];
