@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test as uiTest } from '@automation/referenced-automation-ui';
 import { getLogger, loadEnv } from '@automation/referenced-automation-utils';
+import { appendCreated, DEFAULT_DATA_DIR, formatCreated, SapDataRegistry } from './data';
 import { createSampleSapSystem } from './fakeSapGui';
 import { PowerShellTransport } from './powershellTransport';
 import { appendInsight, DEFAULT_INSIGHTS_DIR } from '../insights';
@@ -152,7 +153,7 @@ export class SapConnection {
  * On a machine that isn't Windows the test is SKIPPED with the reason shown
  * in the report - never silently passed.
  */
-export const sapGuiTest = uiTest.extend<{ sap: SapGuiSession }, SapGuiOptions & { sapConnection: SapConnection }>({
+export const sapGuiTest = uiTest.extend<{ sap: SapGuiSession; sapData: SapDataRegistry }, SapGuiOptions & { sapConnection: SapConnection }>({
   sapGuiMode: [undefined, { option: true, scope: 'worker' }],
   sapGuiTransport: [undefined, { option: true, scope: 'worker' }],
   sapGuiReuse: [undefined, { option: true, scope: 'worker' }],
@@ -182,6 +183,27 @@ export const sapGuiTest = uiTest.extend<{ sap: SapGuiSession }, SapGuiOptions & 
       await attachDiagnostics(session, testInfo, sapConnection.evidence, testInfo.status !== testInfo.expectedStatus);
       if (sapConnection.insights) recordInsight(session, testInfo, sapConnection.insightsDir);
       if (sapConnection.reuse === 'test') await sapConnection.dispose();
+    }
+  },
+
+  /**
+   * Everything the test created in SAP. Register what you create (`sapData.record(...)` /
+   * `captureFromStatusBar(...)`) with a cleanup, and it is undone after the test - pass or fail,
+   * and after every retry. SAP_GUI_CLEANUP=off leaves everything (the audit list is still written).
+   */
+  sapData: async ({ sap }, use, testInfo) => {
+    const registry = new SapDataRegistry(sap, testInfo.titlePath.slice(1).join(' > '));
+    await use(registry);
+    if (registry.items.length === 0) return;
+    if (loadEnv().get('SAP_GUI_CLEANUP', 'on') !== 'off') {
+      await sap.home().catch(() => undefined); // cleanup starts from a known screen, even after a failed test
+      await registry.cleanup();
+    }
+    try {
+      appendCreated(registry.items, loadEnv().get('SAP_GUI_DATA_DIR', DEFAULT_DATA_DIR));
+      await testInfo.attach('sap-created-data', { body: formatCreated(registry.items), contentType: 'text/plain' });
+    } catch (error) {
+      log.warn(`[sap-gui] could not write the created-data audit list: ${String(error)}`);
     }
   },
 });

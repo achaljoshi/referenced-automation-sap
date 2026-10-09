@@ -15,3 +15,4 @@ export type { JournalEntry, PopupMatch } from './session';
 export { SapConnection, attachDiagnostics, type Attacher } from './fixtures';
 export { envSecrets, dpapiSecrets, storeDpapiSecret, resolveSecret, defaultSecretProviders, type SecretProvider } from './secrets';
 export * from '../insights';
+export { SapDataRegistry, appendCreated, loadCreated, orphans, formatCreated, DEFAULT_DATA_DIR, type CreatedObject, type CreatedStatus, type RecordOptions } from './data';

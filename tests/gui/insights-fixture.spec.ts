@@ -5,13 +5,22 @@ import { expect } from '@playwright/test';
 import { ensureLoggedIn, loadInsights } from '../../src';
 import { countingTest, creds } from './countingTest';
 
-// Where this file's tests record what they do (read lazily by the fixture, so set before the first test runs).
+// Where this file's tests record what they do. The fixture reads it lazily; it is set in beforeAll (not at import) because one worker can load several files and a global set at import would leak between them.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sapinsights-fixture-'));
-process.env.SAP_GUI_INSIGHTS_DIR = dir;
 
 const test = countingTest({ opened: 0 });
 test.use({ sapGuiMode: 'attach' });
 test.describe.configure({ mode: 'serial' });
+const saved: Record<string, string | undefined> = {};
+test.beforeAll(() => {
+  saved.SAP_GUI_INSIGHTS_DIR = process.env.SAP_GUI_INSIGHTS_DIR;
+  process.env.SAP_GUI_INSIGHTS_DIR = dir;
+});
+test.afterAll(() => {
+  if (saved.SAP_GUI_INSIGHTS_DIR === undefined) delete process.env.SAP_GUI_INSIGHTS_DIR;
+  else process.env.SAP_GUI_INSIGHTS_DIR = saved.SAP_GUI_INSIGHTS_DIR;
+});
+
 
 test('first test does something in VA01', async ({ sap }) => {
   await ensureLoggedIn(sap, creds);
