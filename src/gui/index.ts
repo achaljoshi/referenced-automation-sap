@@ -22,3 +22,4 @@ export { captureContract, diffContracts, formatDiff, saveContract, loadContract,
 export { runConformance, formatConformance, type ConformanceReport, type ConformanceResult, type ConformanceOptions } from './conformance';
 export { JavaTransport, type JavaTransportOptions } from './javaTransport';
 export { startRealTransport, selectedTransport, type TransportKind } from './transportFactory';
+export { registerSapSteps, type BddSteps } from './steps';

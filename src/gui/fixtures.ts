@@ -209,7 +209,7 @@ export class SapConnection {
  * in the report - never silently passed.
  */
 export const sapGuiTest = uiTest.extend<
-  { sap: SapGuiSession; sapData: SapDataRegistry },
+  { sap: SapGuiSession; sapData: SapDataRegistry; sapScenario: Map<string, string> },
   SapGuiOptions & { sapConnection: SapConnection }
 >({
   sapGuiMode: [undefined, { option: true, scope: 'worker' }],
@@ -252,6 +252,11 @@ export const sapGuiTest = uiTest.extend<
       if (sapConnection.insights) recordInsight(session, testInfo, sapConnection.insightsDir);
       if (sapConnection.reuse === 'test') await sapConnection.dispose();
     }
+  },
+
+  /** Values remembered between the steps of one scenario (used by the BDD steps: "I remember the number ... as ..."). Fresh for every test. */
+  sapScenario: async ({}, use) => {
+    await use(new Map<string, string>());
   },
 
   /**
