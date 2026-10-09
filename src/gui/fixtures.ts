@@ -5,7 +5,7 @@ import { test as uiTest } from '@automation/referenced-automation-ui';
 import { getLogger, loadEnv } from '@automation/referenced-automation-utils';
 import { appendCreated, DEFAULT_DATA_DIR, formatCreated, SapDataRegistry } from './data';
 import { createSampleSapSystem } from './fakeSapGui';
-import { PowerShellTransport } from './powershellTransport';
+import { startRealTransport } from './transportFactory';
 import { appendInsight, DEFAULT_INSIGHTS_DIR } from '../insights';
 import { SapUserPool, type UserLease } from './pool';
 import { SapGuiSession } from './session';
@@ -139,9 +139,7 @@ export class SapConnection {
               transitionDelayMs: 100,
             })
           : undefined) ??
-        (await PowerShellTransport.start({
-          powershellPath: env.getOptional('SAP_GUI_POWERSHELL'),
-        }));
+        (await startRealTransport()).transport;
       const session = await this.openSession(mode, transport, env, timeoutMs, evidence, fallbacks);
       if (this.lease) session.assignedUser = this.lease.user;
       return session;

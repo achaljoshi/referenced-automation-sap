@@ -12,7 +12,11 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "bridge/jacob/src",
+    "bridge/jacob/build.sh",
+    "bridge/jacob/build.bat",
+    "bridge/jacob/README.md"
   ],
   "engines": {
     "node": ">=18"
@@ -39,7 +43,8 @@
     "insights": "node dist/cli/insights.js report",
     "contracts": "node dist/cli/contracts.js",
     "convert:pages": "node dist/cli/convertVbs.js recordings --out tests/sapgui --test-import ./support/sapTest --page-objects",
-    "convert:data": "node dist/cli/convertVbs.js recordings --out tests/sapgui --test-import ./support/sapTest --data"
+    "convert:data": "node dist/cli/convertVbs.js recordings --out tests/sapgui --test-import ./support/sapTest --data",
+    "conformance": "node dist/cli/doctor.js --conformance"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.62.1 <2.0.0"

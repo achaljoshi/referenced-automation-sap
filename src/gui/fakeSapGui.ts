@@ -1,6 +1,15 @@
 import { formatLink } from './memberPath';
 import * as fs from 'node:fs';
-import { SapGuiTransportError, type ChainLink, type ControlInfo, type SapContext, type SapGuiChild, type SapGuiCommand, type SapGuiTransport, type SapGuiValue } from './types';
+import {
+  SapGuiTransportError,
+  type ChainLink,
+  type ControlInfo,
+  type SapContext,
+  type SapGuiChild,
+  type SapGuiCommand,
+  type SapGuiTransport,
+  type SapGuiValue,
+} from './types';
 
 export interface FakeElementSpec {
   type: string;
@@ -59,7 +68,51 @@ export interface FakeCall {
  * trying a conversion without a SAP system - NOT a way to validate a real
  * recording (it only knows the screens you give it).
  */
-function lookup(bag: Record<string, SapGuiValue> | undefined, prop: string): SapGuiValue | undefined {
+/** Properties every SAP GUI control may have (or that scripts commonly read). Anything else not defined for a control is "unknown", as in real COM. */
+const STANDARD_PROPS = new Set([
+  'text',
+  'tooltip',
+  'changeable',
+  'selected',
+  'type',
+  'name',
+  'id',
+  'messagetype',
+  'value',
+  'key',
+  'maxlength',
+  'leftlabel',
+  'rightlabel',
+  'rowcount',
+  'columncount',
+  'visiblerowcount',
+  'selectednode',
+  'selectedrows',
+  'currentcellrow',
+  'currentcellcolumn',
+  'caretposition',
+  'width',
+  'height',
+  'left',
+  'top',
+  'modified',
+  'containertype',
+  'defaulttooltip',
+  'iconname',
+  'highlighted',
+  'entries',
+  'children',
+  'parent',
+  'screenleft',
+  'screentop',
+  'busy',
+  'title',
+]);
+
+function lookup(
+  bag: Record<string, SapGuiValue> | undefined,
+  prop: string,
+): SapGuiValue | undefined {
   if (!bag) return undefined;
   const wanted = prop.toLowerCase();
   const key = Object.keys(bag).find((k) => k.toLowerCase() === wanted);
@@ -123,7 +176,9 @@ export class FakeSapGui implements SapGuiTransport {
       // Like real SAP, a container (wnd[0]/usr, wnd[0]/tbar[0] ...) exists whenever something inside it does,
       // even if the screen definition only lists the leaves.
       const inside = `${id}/`;
-      return Object.keys(this.current.elements).some((key) => key.startsWith(inside) && this.visible(key));
+      return Object.keys(this.current.elements).some(
+        (key) => key.startsWith(inside) && this.visible(key),
+      );
     }
     return Date.now() >= this.readyAt + (spec.appearsAfterMs ?? 0);
   }
@@ -132,11 +187,14 @@ export class FakeSapGui implements SapGuiTransport {
   private read(id: string, prop: string): SapGuiValue {
     const stored = lookup(this.values.get(id), prop);
     if (stored !== undefined) return stored;
-    return lookup(this.current.elements[id]?.props, prop) ?? (prop.toLowerCase() === 'text' ? '' : null);
+    return (
+      lookup(this.current.elements[id]?.props, prop) ?? (prop.toLowerCase() === 'text' ? '' : null)
+    );
   }
 
   private require(id: string): void {
-    if (!this.visible(id)) throw new SapGuiTransportError(`The control could not be found by id: ${id}`, 'NOT_FOUND');
+    if (!this.visible(id))
+      throw new SapGuiTransportError(`The control could not be found by id: ${id}`, 'NOT_FOUND');
   }
 
   private hasScreen(name: string): boolean {
@@ -146,7 +204,11 @@ export class FakeSapGui implements SapGuiTransport {
   /** Where `/n<tcode>` goes: the current screen's own transaction handler, else back to the start screen. */
   private screenFor(tcode: string): string | undefined {
     this.enteredTcode = tcode.toUpperCase();
-    return this.current.onTransaction?.(tcode, this.ctx) ?? this.options.screens.find((s) => s.name === 'easyAccess')?.onTransaction?.(tcode, this.ctx) ?? 'easyAccess';
+    return (
+      this.current.onTransaction?.(tcode, this.ctx) ??
+      this.options.screens.find((s) => s.name === 'easyAccess')?.onTransaction?.(tcode, this.ctx) ??
+      'easyAccess'
+    );
   }
 
   private go(target: string | undefined): void {
@@ -172,18 +234,28 @@ export class FakeSapGui implements SapGuiTransport {
         return this.busy();
       case 'exists':
         return this.visible(command.id);
-      case 'get':
+      case 'get': {
         this.require(command.id);
-        return this.read(command.id, fullName(command.via, command.prop));
-      case 'children': {
-        const prefix = command.id === '' ? '' : `${command.id}/`;
-        const names = new Set<string>();
-        for (const key of Object.keys(this.current.elements)) {
-          if (key.startsWith(prefix) && key !== command.id) names.add(`${prefix}${key.slice(prefix.length).split('/')[0]}`);
+        const path = fullName(command.via, command.prop);
+        // `children.count` is how scripts ask how many controls are inside a container
+        if (path.toLowerCase() === 'children.count') return this.childIds(command.id).length;
+        const known =
+          lookup(this.values.get(command.id), path) !== undefined ||
+          lookup(this.current.elements[command.id]?.props, path) !== undefined;
+        if (!command.via && !known && !STANDARD_PROPS.has(command.prop.toLowerCase())) {
+          throw new SapGuiTransportError(`Unknown property or method: ${command.prop}`, 'ERROR');
         }
-        return [...names]
-          .filter((id) => this.visible(id))
-          .map((id): SapGuiChild => ({ id, type: this.current.elements[id]?.type ?? 'GuiContainer', name: id.split('/').pop() ?? '', text: String(this.read(id, 'text')) }));
+        return this.read(command.id, path);
+      }
+      case 'children': {
+        return this.childIds(command.id).map(
+          (id): SapGuiChild => ({
+            id,
+            type: this.current.elements[id]?.type ?? 'GuiContainer',
+            name: id.split('/').pop() ?? '',
+            text: String(this.read(id, 'text')),
+          }),
+        );
       }
       case 'context':
         return this.contextOf();
@@ -195,18 +267,25 @@ export class FakeSapGui implements SapGuiTransport {
         const c = command.criteria;
         const root = c.root === '' ? '' : `${c.root}/`;
         const has = (needle: string | undefined, actual: string) =>
-          needle === undefined || (c.exact ? actual.trim().toLowerCase() === needle.trim().toLowerCase() : actual.toLowerCase().includes(needle.toLowerCase()));
+          needle === undefined ||
+          (c.exact
+            ? actual.trim().toLowerCase() === needle.trim().toLowerCase()
+            : actual.toLowerCase().includes(needle.toLowerCase()));
         return Object.keys(this.current.elements)
           .filter((id) => id.startsWith(root) && id !== c.root && this.visible(id))
           .filter((id) => {
             const info = this.infoOf(id);
-            const label = String(this.read(id, 'leftlabel') ?? '') + '\u0000' + String(this.read(id, 'rightlabel') ?? '');
+            const label =
+              String(this.read(id, 'leftlabel') ?? '') +
+              '\u0000' +
+              String(this.read(id, 'rightlabel') ?? '');
             return (
               (c.type === undefined || info.type === c.type) &&
               (c.name === undefined || info.name === c.name) &&
               has(c.text, info.text) &&
               has(c.tooltip, info.tooltip) &&
-              (c.label === undefined || label.split('\u0000').some((l) => l !== '' && has(c.label, l)))
+              (c.label === undefined ||
+                label.split('\u0000').some((l) => l !== '' && has(c.label, l)))
             );
           });
       }
@@ -214,21 +293,46 @@ export class FakeSapGui implements SapGuiTransport {
         this.assertAttached();
         this.require(command.id);
         const spec = this.current.elements[command.id];
-        if (spec?.options && command.prop.toLowerCase() === 'value' && !spec.options.includes(String(command.value))) {
-          throw new SapGuiTransportError(`The value "${String(command.value)}" is not valid for this drop-down`, 'ERROR');
+        if (
+          spec?.options &&
+          command.prop.toLowerCase() === 'value' &&
+          !spec.options.includes(String(command.value))
+        ) {
+          throw new SapGuiTransportError(
+            `The value "${String(command.value)}" is not valid for this drop-down`,
+            'ERROR',
+          );
         }
         const prop = fullName(command.via, command.prop);
         this.calls.push({ op: 'set', id: command.id, name: prop, args: [command.value] });
-        this.values.set(command.id, { ...this.values.get(command.id), [prop.toLowerCase()]: command.value });
+        this.values.set(command.id, {
+          ...this.values.get(command.id),
+          [prop.toLowerCase()]: command.value,
+        });
         return null;
       }
       case 'call': {
         this.assertAttached();
         this.require(command.id);
-        this.calls.push({ op: 'call', id: command.id, name: fullName(command.via, command.method), args: command.args });
+        this.calls.push({
+          op: 'call',
+          id: command.id,
+          name: fullName(command.via, command.method),
+          args: command.args,
+        });
         return this.invoke(command.id, command.method, command.args);
       }
     }
+  }
+
+  private childIds(parent: string): string[] {
+    const prefix = parent === '' ? '' : `${parent}/`;
+    const names = new Set<string>();
+    for (const key of Object.keys(this.current.elements)) {
+      if (key.startsWith(prefix) && key !== parent)
+        names.add(`${prefix}${key.slice(prefix.length).split('/')[0]}`);
+    }
+    return [...names].filter((id) => this.visible(id));
   }
 
   private contextOf(): SapContext {
@@ -259,11 +363,19 @@ export class FakeSapGui implements SapGuiTransport {
 
   private invoke(id: string, method: string, args: SapGuiValue[]): unknown {
     const m = method.toLowerCase();
-    const custom = Object.entries(this.current.elements[id]?.methods ?? {}).find(([name]) => name.toLowerCase() === m);
+    const custom = Object.entries(this.current.elements[id]?.methods ?? {}).find(
+      ([name]) => name.toLowerCase() === m,
+    );
     if (custom) return custom[1](args);
     if (m === 'hardcopy' && typeof args[0] === 'string') {
       // a 1x1 PNG, so the evidence pipeline (screenshot -> attachment) can be exercised without a real screen
-      fs.writeFileSync(args[0], Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
+      fs.writeFileSync(
+        args[0],
+        Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+          'base64',
+        ),
+      );
       return null;
     }
     if (m === 'sendvkey' && Number(args[0]) === 0 && id === 'wnd[0]') {
@@ -288,7 +400,8 @@ export class FakeSapGui implements SapGuiTransport {
   }
 
   private assertAttached(): void {
-    if (!this.attached) throw new SapGuiTransportError('not attached to a SAP GUI session', 'ERROR');
+    if (!this.attached)
+      throw new SapGuiTransportError('not attached to a SAP GUI session', 'ERROR');
   }
 
   async close(): Promise<void> {
@@ -312,7 +425,13 @@ export interface SampleSapSystemOptions {
  * own tests.
  */
 export function createSampleSapSystem(options: SampleSapSystemOptions = {}): FakeSapGui {
-  const { user = 'TESTUSER', password = 'correct-horse', client = '100', transitionDelayMs = 150, multipleLogon = false } = options;
+  const {
+    user = 'TESTUSER',
+    password = 'correct-horse',
+    client = '100',
+    transitionDelayMs = 150,
+    multipleLogon = false,
+  } = options;
   const wrongLogin = 'Name or password is incorrect (repeat logon)';
 
   return new FakeSapGui({
@@ -327,7 +446,10 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
           'wnd[0]/usr': { type: 'GuiUserArea' },
           'wnd[0]/usr/txtRSYST-MANDT': { type: 'GuiTextField', props: { leftLabel: 'Client' } },
           'wnd[0]/usr/txtRSYST-BNAME': { type: 'GuiTextField', props: { leftLabel: 'User' } },
-          'wnd[0]/usr/pwdRSYST-BCODE': { type: 'GuiPasswordField', props: { leftLabel: 'Password' } },
+          'wnd[0]/usr/pwdRSYST-BCODE': {
+            type: 'GuiPasswordField',
+            props: { leftLabel: 'Password' },
+          },
           'wnd[0]/usr/txtRSYST-LANGU': { type: 'GuiTextField', props: { leftLabel: 'Language' } },
           'wnd[0]/sbar': { type: 'GuiStatusbar' },
         },
@@ -346,7 +468,10 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
         context: { transaction: '', program: 'SAPMSYST', screen: '0100' },
         elements: {
           'wnd[0]': { type: 'GuiMainWindow' },
-          'wnd[1]': { type: 'GuiModalWindow', props: { text: 'License Information for Multiple Logons' } },
+          'wnd[1]': {
+            type: 'GuiModalWindow',
+            props: { text: 'License Information for Multiple Logons' },
+          },
           'wnd[1]/usr/radMULTI_LOGON_OPT1': { type: 'GuiRadioButton' },
           'wnd[1]/usr/radMULTI_LOGON_OPT2': { type: 'GuiRadioButton' },
           'wnd[1]/usr/radMULTI_LOGON_OPT3': { type: 'GuiRadioButton' },
@@ -363,7 +488,10 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
           'wnd[0]': { type: 'GuiMainWindow' },
           'wnd[0]/usr/txtRSYST-MANDT': { type: 'GuiTextField', props: { leftLabel: 'Client' } },
           'wnd[0]/usr/txtRSYST-BNAME': { type: 'GuiTextField', props: { leftLabel: 'User' } },
-          'wnd[0]/usr/pwdRSYST-BCODE': { type: 'GuiPasswordField', props: { leftLabel: 'Password' } },
+          'wnd[0]/usr/pwdRSYST-BCODE': {
+            type: 'GuiPasswordField',
+            props: { leftLabel: 'Password' },
+          },
           'wnd[0]/usr/txtRSYST-LANGU': { type: 'GuiTextField', props: { leftLabel: 'Language' } },
           // real SAP stays on the logon screen and reports the error in the status bar (type E)
           'wnd[0]/sbar': { type: 'GuiStatusbar', props: { messageType: 'E' } },
@@ -377,10 +505,13 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
           'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
           'wnd[0]/sbar': { type: 'GuiStatusbar' },
         },
-        onTransaction: (tcode) => (tcode.toUpperCase() === 'VA01' ? 'va01Initial' : 'otherTransaction'),
+        onTransaction: (tcode) =>
+          tcode.toUpperCase() === 'VA01' ? 'va01Initial' : 'otherTransaction',
         onVKey: (vKey, ctx) => {
           if (vKey !== 0) return undefined;
-          const code = String(ctx.get('wnd[0]/tbar[0]/okcd', 'text')).replace(/^\/n/i, '').toUpperCase();
+          const code = String(ctx.get('wnd[0]/tbar[0]/okcd', 'text'))
+            .replace(/^\/n/i, '')
+            .toUpperCase();
           return code === 'VA01' ? 'va01Initial' : code ? 'otherTransaction' : undefined;
         },
       },
@@ -397,7 +528,10 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
         name: 'va01Initial',
         context: { transaction: 'VA01', program: 'SAPMV45A', screen: '0101' },
         elements: {
-          'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Create Sales Order: Initial Screen' } },
+          'wnd[0]': {
+            type: 'GuiMainWindow',
+            props: { text: 'Create Sales Order: Initial Screen' },
+          },
           'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
           'wnd[0]/usr/ctxtVBAK-AUART': { type: 'GuiCTextField' },
           'wnd[0]/usr/ctxtVBAK-VKORG': { type: 'GuiCTextField' },
@@ -405,7 +539,10 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
           'wnd[0]/usr/ctxtVBAK-SPART': { type: 'GuiCTextField' },
           'wnd[0]/sbar': { type: 'GuiStatusbar' },
         },
-        onVKey: (vKey, ctx) => (vKey === 0 && ctx.get('wnd[0]/usr/ctxtVBAK-AUART', 'text') === 'OR' ? 'va01Overview' : undefined),
+        onVKey: (vKey, ctx) =>
+          vKey === 0 && ctx.get('wnd[0]/usr/ctxtVBAK-AUART', 'text') === 'OR'
+            ? 'va01Overview'
+            : undefined,
       },
       {
         name: 'va01Overview',
@@ -413,10 +550,19 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
         elements: {
           'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Create Standard Order: Overview' } },
           'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
-          'wnd[0]/usr/ctxtKUAGV-KUNNR': { type: 'GuiCTextField', props: { leftLabel: 'Sold-To Party' } },
+          'wnd[0]/usr/ctxtKUAGV-KUNNR': {
+            type: 'GuiCTextField',
+            props: { leftLabel: 'Sold-To Party' },
+          },
           'wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG': { type: 'GuiTableControl' },
-          'wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG/ctxtRV45A-MABNR[1,0]': { type: 'GuiCTextField', appearsAfterMs: 120 },
-          'wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG/txtRV45A-KWMENG[3,0]': { type: 'GuiTextField', appearsAfterMs: 120 },
+          'wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG/ctxtRV45A-MABNR[1,0]': {
+            type: 'GuiCTextField',
+            appearsAfterMs: 120,
+          },
+          'wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG/txtRV45A-KWMENG[3,0]': {
+            type: 'GuiTextField',
+            appearsAfterMs: 120,
+          },
           'wnd[0]/tbar[0]/btn[11]': { type: 'GuiButton', props: { tooltip: 'Save' } },
           'wnd[0]/tbar[0]/btn[3]': { type: 'GuiButton', props: { tooltip: 'Back' } },
           'wnd[0]/sbar': { type: 'GuiStatusbar' },

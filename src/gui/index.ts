@@ -1,6 +1,7 @@
 export * from './types';
 export { SapGuiSession, SapGuiElementNotFoundError, type SapGuiSessionOptions } from './session';
 export { PowerShellTransport, type PowerShellTransportOptions } from './powershellTransport';
+export { ProcessTransport, type ProcessTransportOptions } from './processTransport';
 export { sapGuiTest, type SapGuiOptions } from './fixtures';
 export { FakeSapGui, createSampleSapSystem, type FakeElementSpec, type FakeScreen, type FakeSapGuiOptions, type SampleSapSystemOptions } from './fakeSapGui';
 export { logon, ensureLoggedIn, isOnLogonScreen, type SapCredentials } from './logon';
@@ -18,3 +19,6 @@ export * from '../insights';
 export { SapDataRegistry, appendCreated, loadCreated, orphans, formatCreated, DEFAULT_DATA_DIR, type CreatedObject, type CreatedStatus, type RecordOptions } from './data';
 export { SapUserPool, type UserLease, type LeaseHolder, type UserPoolOptions } from './pool';
 export { captureContract, diffContracts, formatDiff, saveContract, loadContract, contractPath, DEFAULT_CONTRACTS_DIR, type ScreenContract, type ContractControl, type ContractDiff, type CaptureOptions } from './contract';
+export { runConformance, formatConformance, type ConformanceReport, type ConformanceResult, type ConformanceOptions } from './conformance';
+export { JavaTransport, type JavaTransportOptions } from './javaTransport';
+export { startRealTransport, selectedTransport, type TransportKind } from './transportFactory';

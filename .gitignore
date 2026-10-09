@@ -50,3 +50,7 @@ out/
 
 # Windows-DPAPI-protected secrets (sap-gui-secret) - never committed
 .secrets/
+
+# Built Java bridge
+bridge/jacob/out/
+bridge/jacob/sap-bridge.jar
