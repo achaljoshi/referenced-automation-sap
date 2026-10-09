@@ -44,7 +44,7 @@ A recording has no waits. It worked when you recorded it because you were slow; 
 2. **Enable it on the server.** Profile parameter `sapgui/user_scripting = TRUE` - ask your SAP Basis team.
 3. **Install:** `npm install && npm run build` (Node 18+).
 4. **Configure** (see section 4).
-5. **Check:** `npm run doctor`. It does what the tests will do and prints OK/FAIL per step with the fix.
+5. **Check:** `npm run doctor` (and `npm run doctor -- --conformance`, which runs a fixed set of checks against your SAP and says whether this transport conforms). It does what the tests will do and prints OK/FAIL per step with the fix.
 
 ## 4. Configuration
 
@@ -59,6 +59,11 @@ Settings come from `.env.<name>` (committed, **no secrets**), overridden by `.en
 | `SAP_GUI_CONNECTION_INDEX` / `SAP_GUI_SESSION_INDEX` | which open connection/session, for `attach` | `0` / `0` |
 | `SAP_GUI_CONNECTION_STRING` | open a system by connection string instead of a SAP Logon entry (`open` mode) | |
 | `SAP_GUI_TIMEOUT_MS` | longest any single step waits | `30000` |
+| `SAP_GUI_TRANSPORT` | `powershell` (default) or `java` (the Java/JACOB helper in `bridge/jacob`, with `SAP_GUI_BRIDGE_JAR`, `SAP_GUI_JACOB_JAR`, `SAP_GUI_JACOB_DLL`, `SAP_GUI_JAVA`) | `powershell` |
+| `SAP_USER_POOL` | comma list of users leased one per worker (open mode); `SAP_PASSWORD_<USER>` per user; `SAP_GUI_POOL_TIMEOUT_MS`, `SAP_GUI_POOL_DIR` | |
+| `SAP_GUI_FALLBACKS` | `report` / `fail` / `off` - what to do when a locator fallback is used | `report` |
+| `SAP_GUI_CLEANUP` | `off` keeps the data tests created | on |
+| `SAP_GUI_INSIGHTS` / `SAP_GUI_INSIGHTS_DIR` | `off` disables recording of transactions and timings | on |
 | `SAP_GUI_REUSE` | `worker` = one session per worker, reset between tests; `test` = a fresh connection per test | `worker` |
 | `SAP_GUI_EVIDENCE` | `off` / `failure` (screenshot + journal on failure) / `steps` (also after every screen change) | `failure` |
 | `SAP_MULTIPLE_LOGON` | `continue` or `fail` when SAP says the user is already logged on | `continue` |
@@ -171,6 +176,46 @@ The password is looked up as `SAP_PASSWORD` in this order: real environment vari
 - **Record** with SAP GUI's *Script Recording and Playback* (Alt+F12 menu), save the `.vbs`, and either copy the ids or convert the whole thing (next section).
 - **Inspect the live screen:** `npm run doctor -- --dump` lists every control with id and type; `npm run doctor -- --dump "wnd[1]"` does a pop-up.
 
+## 5b. Advanced capabilities
+
+Each of these is opt-in and tested against the simulator; none has been run against a real SAP GUI yet (see section 9).
+
+### Know where SAP is, and what your tests cover
+The session reads SAP's own session info after every screen change, so every journal line, failure and report says **which transaction, program and screen** SAP was on (`system FAKE, client 100 ... transaction VA01, screen 4001, program SAPMV45A`). Each test also appends its steps to `test-results/sap-insights/`; then:
+
+```bash
+npx sap-gui-insights report --expected VA01,VA02,FB60   # transactions covered (and the expected ones nobody touched), slowest steps, SAP's own response times
+npx sap-gui-insights baseline                            # save this run's step timings from a known-good run
+npx sap-gui-insights check --baseline sap-baseline.json  # exit 1 if a step kind got clearly slower
+```
+The comparison is deliberately conservative (a change must be large in percent **and** milliseconds, with enough samples), so it tells you where to look; it is not a load test. `SAP_GUI_INSIGHTS=off` disables recording.
+
+### Survive an id change, visibly
+```ts
+readonly customer = this.sap.locator('wnd[0]/usr/ctxtKUAGV-KUNNR').orElse(this.sap.getByLabel('Sold-To Party'));
+```
+If the id is gone but the label is there, the test continues **and the drift is reported** (attached to the test, listed in the insights report, with the id to put in the page object). The primary id gets a grace period first, so a slow screen is not mistaken for a changed id; an ambiguous fallback is never used. `SAP_GUI_FALLBACKS=fail` turns drift into a failure naming the new id (for a nightly drift check); `off` ignores fallbacks.
+
+### Catch a screen change before a dozen tests fail
+```ts
+await expect(sap).toMatchScreenContract('va01-overview');   // compares with contracts/va01-overview.contract.json
+```
+```bash
+npx sap-gui-contracts capture va01-overview   # on the right screen, once; review and COMMIT the file
+npx sap-gui-contracts diff old.json new.json  # no SAP needed
+```
+A contract records the ids, types and fixed captions of a screen - never field values; table-cell positions are ignored. A control that disappeared or changed type fails, with where it probably moved; additions and caption changes pass unless `strict`. Update a baseline on purpose with `SAP_GUI_UPDATE_CONTRACTS=true`.
+
+### Create data, and always clean it up
+```ts
+const orderNo = await sapData.captureFromStatusBar('SalesOrder', /Order (\d+) has been saved/, { cleanup: (s) => cancelOrder(s, orderNo) });
+const customer = sapData.unique('CUST');   // never collides with what an earlier attempt left
+```
+Cleanups run after the test - pass or fail, after every retry, newest first, continuing past a failure. `npx sap-gui-data orphans` lists whatever could not be cleaned (exit 1). `SAP_GUI_CLEANUP=off` keeps everything for inspection.
+
+### Run workers in parallel without "already logged on"
+`SAP_USER_POOL=U1,U2,U3` (with `SAP_GUI_MODE=open`): each worker leases a distinct user (exclusive across processes on one machine, with a heartbeat and recovery from crashed runs) and `logon()` uses its own `SAP_PASSWORD_<USER>` or the shared `SAP_PASSWORD`. A file lock cannot coordinate several CI machines using the same users; give each machine its own users.
+
 ## 6. Converting recordings
 
 ```bash
@@ -188,6 +233,11 @@ Review the generated header. It lists everything that needs a human.
 | typed passwords | **never copied** - replaced with `env.get('SAP_PASSWORD')`; `--param <id-regex>=<ENV_VAR>` does the same for any other field |
 | `If` / `For` / `Do` / `Select Case` / `MsgBox` | **not guessed**: left as `// TODO(manual, vbs:N)` with the original line, everything inside the block held back. `--strict` exits non-zero so CI cannot miss it |
 | a variable inside a chained path (`getAbsoluteRow(i)`) | TODO |
+
+**More than a flat script:**
+- `npm run convert:pages` (`--page-objects`) cuts the recording into **screens** at every server round trip: one page class per screen with named properties, a shared base for the command field, toolbar and status bar, table-control helpers, and a test that waits for each page. Names are mechanical (`Screen1`, `vbakAuart`) - rename them to business terms.
+- `npm run convert:data` (`--data`, implies page objects) turns every literal typed in the recording into a column of `<name>.data.csv` and runs **one test per row**; the first row holds what was recorded. User, client, password and language still come from the environment, never the CSV; a missing column fails with its name.
+- `--out` is a folder unless it ends in `.ts`. See `tests/gui/generated/` for a committed example that a test keeps in step with the converter.
 
 **A recording contains the password you typed, in clear text.** The converter keeps it out of the spec, but do not commit the `.vbs` file itself if it has one.
 

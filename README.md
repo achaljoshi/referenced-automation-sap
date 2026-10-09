@@ -72,7 +72,7 @@ SAP GUI's built-in **Script Recording and Playback** writes a VBScript of what y
  recording.vbs --sap-vbs-to-playwright--> recording.spec.ts --playwright test--> SapGuiSession --PowerShell/COM--> SAP GUI
 ```
 
-> The full guide - how it works, configuration, troubleshooting table, CI, limits - is in [`docs/SAP_GUI_GUIDE.md`](docs/SAP_GUI_GUIDE.md). Design decisions and trade-offs: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Coming from the Java/JACOB framework: [`docs/MIGRATION_FROM_JAVA.md`](docs/MIGRATION_FROM_JAVA.md).
+> The full guide - how it works, configuration, troubleshooting table, CI, limits - is in [`docs/SAP_GUI_GUIDE.md`](docs/SAP_GUI_GUIDE.md). Design decisions and trade-offs: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Advanced capabilities (insights, drift-reporting fallbacks, screen contracts, data cleanup, user pool, Java/JACOB transport, page-object and data-driven conversion): [guide section 5b](docs/SAP_GUI_GUIDE.md#5b-advanced-capabilities). Coming from the Java/JACOB framework: [`docs/MIGRATION_FROM_JAVA.md`](docs/MIGRATION_FROM_JAVA.md).
 
 ### Getting started with SAP GUI (first time, from zero)
 
