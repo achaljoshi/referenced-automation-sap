@@ -116,6 +116,11 @@ export class SapTable {
     readonly id: string,
   ) {}
 
+  /** The table control itself, for members the helpers here do not cover (`.set('columns.elementAt(1).width', 18)`). */
+  get locator(): SapLocator {
+    return this.sap.locator(this.id);
+  }
+
   /** The cell of field `field` (e.g. 'ctxtRV45A-MABNR') at the column/row position shown on screen. */
   cell(field: string, column: number, row: number): SapLocator {
     return this.sap.locator(`${this.id}/${field}[${column},${row}]`);

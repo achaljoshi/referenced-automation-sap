@@ -48,7 +48,7 @@ export interface Generated {
   envVars: string[];
 }
 
-function quote(value: string): string {
+export function quote(value: string): string {
   return `'${value
     .replace(/\\/g, '\\\\')
     .replace(/'/g, "\\'")
@@ -58,11 +58,11 @@ function quote(value: string): string {
 }
 
 const RESERVED = new Set(['default', 'new', 'class', 'function', 'var', 'let', 'const', 'delete', 'in', 'of', 'with', 'switch', 'case', 'sap', 'env', 'test']);
-function identifier(name: string): string {
+export function identifier(name: string): string {
   return RESERVED.has(name) ? `${name}_` : name;
 }
 
-function renderExpr(expr: Expr): string {
+export function renderExpr(expr: Expr): string {
   switch (expr.kind) {
     case 'string':
       return quote(expr.value);

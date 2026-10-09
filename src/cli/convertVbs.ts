@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { convertVbs, type ParamRule } from '../vbs';
+import { csvUtils } from '@automation/referenced-automation-utils';
+import { convertToPageObjects, convertVbs, type ParamRule } from '../vbs';
 
 const USAGE = `sap-vbs-to-playwright - turn SAP GUI Scripting recordings (.vbs) into Playwright tests
 
@@ -9,7 +10,7 @@ Usage:
   sap-vbs-to-playwright <file.vbs | folder> [options]
 
 Options:
-  --out <file|folder>     Where to write the spec(s). Default: next to the input, <name>.spec.ts.
+  --out <file.ts|folder>  Where to write the spec(s): a .ts file name, or a folder (created if needed). Default: next to the input, <name>.spec.ts.
   --test-import <module>  Module the spec imports \`sapGuiTest\` from. Default: @automation/referenced-automation-sap.
                           Point it at your own base test (a relative path) to add your project's fixtures.
   --param <id-regex>=<ENV_VAR>
@@ -19,12 +20,29 @@ Options:
   --tag <tag>             Tag added to the test title. Default: @sapgui.
   --keep-session-prefix   Keep the recorder's /app/con[0]/ses[0]/ id prefix.
   --no-line-comments      Don't add "// vbs:<line>" trace comments.
+  --page-objects          Generate page objects (one class per screen, ids in one place) plus a test that uses them,
+                          instead of one flat script. Written to <out>/pages/<Name>Pages.ts.
+  --data                  Make every literal typed in the recording a column of <name>.data.csv and run one test per row
+                          (implies --page-objects). The first row holds the values that were recorded.
+  --sap-import <module>   Module the page objects import SapPage from. Default: @automation/referenced-automation-sap.
   --strict                Exit with an error if anything could not be converted automatically.
   -h, --help
 `;
 
 function parseArgs(argv: string[]) {
-  const opts = { input: '', out: '', testImport: undefined as string | undefined, tag: undefined as string | undefined, params: [] as ParamRule[], keepPrefix: false, lineComments: true, strict: false };
+  const opts = {
+    input: '',
+    out: '',
+    testImport: undefined as string | undefined,
+    tag: undefined as string | undefined,
+    params: [] as ParamRule[],
+    keepPrefix: false,
+    lineComments: true,
+    strict: false,
+    pageObjects: false,
+    data: false,
+    sapImport: undefined as string | undefined,
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
     const value = () => {
@@ -41,6 +59,11 @@ function parseArgs(argv: string[]) {
     else if (arg === '--keep-session-prefix') opts.keepPrefix = true;
     else if (arg === '--no-line-comments') opts.lineComments = false;
     else if (arg === '--strict') opts.strict = true;
+    else if (arg === '--page-objects') opts.pageObjects = true;
+    else if (arg === '--data') {
+      opts.data = true;
+      opts.pageObjects = true;
+    } else if (arg === '--sap-import') opts.sapImport = value();
     else if (arg === '--param') {
       const [pattern, envVar] = value().split('=');
       if (!pattern || !envVar) throw new Error('--param expects <id-regex>=<ENV_VAR>');
@@ -62,7 +85,10 @@ function main(): void {
   }
 
   const inputs = fs.statSync(opts.input).isDirectory()
-    ? fs.readdirSync(opts.input).filter((f) => f.toLowerCase().endsWith('.vbs')).map((f) => path.join(opts.input, f))
+    ? fs
+        .readdirSync(opts.input)
+        .filter((f) => f.toLowerCase().endsWith('.vbs'))
+        .map((f) => path.join(opts.input, f))
     : [opts.input];
   if (inputs.length === 0) {
     process.stderr.write(`no .vbs files found in ${opts.input}\n`);
@@ -72,11 +98,12 @@ function main(): void {
   let totalWarnings = 0;
   for (const file of inputs) {
     const name = path.basename(file, path.extname(file));
+    // --out is a file only if it names one (ends in .ts); otherwise it is a folder, whether or not it exists yet.
     const outPath =
-      inputs.length === 1 && opts.out && !fs.existsSync(opts.out)
+      inputs.length === 1 && opts.out.endsWith('.ts')
         ? opts.out
         : path.join(opts.out || path.dirname(file), `${name}.spec.ts`);
-    const result = convertVbs(fs.readFileSync(file, 'utf8'), {
+    const common = {
       testName: `recorded: ${name}`,
       sourceName: path.relative(process.cwd(), file).replace(/\\/g, '/'),
       testImport: opts.testImport,
@@ -84,12 +111,42 @@ function main(): void {
       stripSessionPrefix: !opts.keepPrefix,
       params: opts.params,
       lineComments: opts.lineComments,
-    });
+    };
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    fs.writeFileSync(outPath, result.code);
-    process.stdout.write(`${file}  ->  ${outPath}\n`);
-    if (result.envVars.length > 0) process.stdout.write(`    reads from the environment: ${result.envVars.join(', ')}\n`);
-    for (const warning of result.warnings) process.stdout.write(`    line ${warning.line}: ${warning.message}\n`);
+    let result: { warnings: Array<{ line: number; message: string }>; envVars: string[] };
+    if (opts.pageObjects) {
+      const generated = convertToPageObjects(fs.readFileSync(file, 'utf8'), {
+        ...common,
+        baseName: name,
+        sapImport: opts.sapImport,
+        dataDriven: opts.data,
+      });
+      const outDir = path.dirname(outPath);
+      fs.mkdirSync(path.join(outDir, 'pages'), { recursive: true });
+      const pagesPath = path.join(outDir, 'pages', generated.pages.fileName);
+      fs.writeFileSync(outPath, generated.spec);
+      fs.writeFileSync(pagesPath, generated.pages.code);
+      process.stdout.write(
+        `${file}  ->  ${outPath}\n    pages: ${pagesPath} (${generated.screens.length} screen(s))\n`,
+      );
+      if (generated.data) {
+        const dataPath = path.join(outDir, generated.data.fileName);
+        fs.writeFileSync(dataPath, csvUtils.toCsv(generated.data.rows));
+        process.stdout.write(
+          `    data:  ${dataPath} (${Object.keys(generated.data.rows[0] ?? {}).length} column(s); add a row per case)\n`,
+        );
+      }
+      result = generated;
+    } else {
+      const flat = convertVbs(fs.readFileSync(file, 'utf8'), common);
+      fs.writeFileSync(outPath, flat.code);
+      process.stdout.write(`${file}  ->  ${outPath}\n`);
+      result = flat;
+    }
+    if (result.envVars.length > 0)
+      process.stdout.write(`    reads from the environment: ${result.envVars.join(', ')}\n`);
+    for (const warning of result.warnings)
+      process.stdout.write(`    line ${warning.line}: ${warning.message}\n`);
     totalWarnings += result.warnings.length;
   }
   if (opts.strict && totalWarnings > 0) {

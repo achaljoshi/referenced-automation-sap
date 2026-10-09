@@ -37,7 +37,9 @@
     "doctor": "node dist/cli/doctor.js",
     "try:simulator": "node scripts/try-simulator.js",
     "insights": "node dist/cli/insights.js report",
-    "contracts": "node dist/cli/contracts.js"
+    "contracts": "node dist/cli/contracts.js",
+    "convert:pages": "node dist/cli/convertVbs.js recordings --out tests/sapgui --test-import ./support/sapTest --page-objects",
+    "convert:data": "node dist/cli/convertVbs.js recordings --out tests/sapgui --test-import ./support/sapTest --data"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.62.1 <2.0.0"
