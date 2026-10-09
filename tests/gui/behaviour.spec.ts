@@ -158,7 +158,7 @@ test.describe('journal and evidence', () => {
     expect(attached).toEqual([]);
 
     await attachDiagnostics(sap, testInfo, 'failure', true);
-    expect(attached).toEqual(['sap-steps', 'sap-status-bar', 'sap-screenshot']);
+    expect(attached).toEqual(['sap-context', 'sap-steps', 'sap-status-bar', 'sap-screenshot']);
   });
 
   test("SAP_GUI_EVIDENCE=off attaches nothing even on failure", async () => {

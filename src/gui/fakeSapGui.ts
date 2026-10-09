@@ -1,6 +1,6 @@
 import { formatLink } from './memberPath';
 import * as fs from 'node:fs';
-import { SapGuiTransportError, type ChainLink, type ControlInfo, type SapGuiChild, type SapGuiCommand, type SapGuiTransport, type SapGuiValue } from './types';
+import { SapGuiTransportError, type ChainLink, type ControlInfo, type SapContext, type SapGuiChild, type SapGuiCommand, type SapGuiTransport, type SapGuiValue } from './types';
 
 export interface FakeElementSpec {
   type: string;
@@ -27,6 +27,8 @@ export interface FakeScreen {
   onPress?: Record<string, (ctx: FakeContext) => string | undefined>;
   /** `session.startTransaction`. */
   onTransaction?: (tcode: string, ctx: FakeContext) => string | undefined;
+  /** What SAP's session info reports on this screen. `transaction: '$TCODE'` means "whatever transaction code was entered". */
+  context?: { transaction: string; program: string; screen: string };
   /** Text for the status bar after arriving on this screen (set on `wnd[0]/sbar`). */
   status?: string | ((ctx: FakeContext) => string);
 }
@@ -77,6 +79,9 @@ export class FakeSapGui implements SapGuiTransport {
   private arrivedAt = 0;
   private readyAt = 0;
   private attached = false;
+  private enteredTcode = '';
+  private lastTransitionMs = 0;
+  private roundTrips = 0;
   private closed = false;
 
   constructor(private readonly options: FakeSapGuiOptions) {
@@ -140,11 +145,16 @@ export class FakeSapGui implements SapGuiTransport {
 
   /** Where `/n<tcode>` goes: the current screen's own transaction handler, else back to the start screen. */
   private screenFor(tcode: string): string | undefined {
+    this.enteredTcode = tcode.toUpperCase();
     return this.current.onTransaction?.(tcode, this.ctx) ?? this.options.screens.find((s) => s.name === 'easyAccess')?.onTransaction?.(tcode, this.ctx) ?? 'easyAccess';
   }
 
   private go(target: string | undefined): void {
-    if (target) this.enter(this.screen(target), this.options.transitionDelayMs ?? 0);
+    if (target) {
+      this.lastTransitionMs = this.options.transitionDelayMs ?? 0;
+      this.roundTrips++;
+      this.enter(this.screen(target), this.lastTransitionMs);
+    }
   }
 
   async request(command: SapGuiCommand): Promise<unknown> {
@@ -175,6 +185,8 @@ export class FakeSapGui implements SapGuiTransport {
           .filter((id) => this.visible(id))
           .map((id): SapGuiChild => ({ id, type: this.current.elements[id]?.type ?? 'GuiContainer', name: id.split('/').pop() ?? '', text: String(this.read(id, 'text')) }));
       }
+      case 'context':
+        return this.contextOf();
       case 'info': {
         this.require(command.id);
         return this.infoOf(command.id);
@@ -217,6 +229,21 @@ export class FakeSapGui implements SapGuiTransport {
         return this.invoke(command.id, command.method, command.args);
       }
     }
+  }
+
+  private contextOf(): SapContext {
+    const c = this.current.context ?? { transaction: '', program: 'SAPMSYST', screen: '0100' };
+    return {
+      system: 'FAKE',
+      client: '100',
+      user: 'TESTUSER',
+      language: 'EN',
+      transaction: c.transaction === '$TCODE' ? this.enteredTcode : c.transaction,
+      program: c.program,
+      screen: c.screen,
+      responseMs: this.lastTransitionMs,
+      roundTrips: this.roundTrips,
+    };
   }
 
   private infoOf(id: string): ControlInfo {
@@ -294,6 +321,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
     screens: [
       {
         name: 'logon',
+        context: { transaction: '', program: 'SAPMSYST', screen: '0100' },
         elements: {
           'wnd[0]': { type: 'GuiMainWindow' },
           'wnd[0]/usr': { type: 'GuiUserArea' },
@@ -315,6 +343,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
       {
         // Real SAP: a dialog (wnd[1]) over the logon window; OPT2 = continue without ending the other sessions.
         name: 'multipleLogon',
+        context: { transaction: '', program: 'SAPMSYST', screen: '0100' },
         elements: {
           'wnd[0]': { type: 'GuiMainWindow' },
           'wnd[1]': { type: 'GuiModalWindow', props: { text: 'License Information for Multiple Logons' } },
@@ -328,6 +357,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
       },
       {
         name: 'logonFailed',
+        context: { transaction: '', program: 'SAPMSYST', screen: '0100' },
         status: wrongLogin,
         elements: {
           'wnd[0]': { type: 'GuiMainWindow' },
@@ -341,6 +371,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
       },
       {
         name: 'easyAccess',
+        context: { transaction: 'SESSION_MANAGER', program: 'SAPLSMTR_NAVIGATION', screen: '0100' },
         elements: {
           'wnd[0]': { type: 'GuiMainWindow', props: { text: 'SAP Easy Access' } },
           'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
@@ -355,6 +386,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
       },
       {
         name: 'otherTransaction',
+        context: { transaction: '$TCODE', program: 'SAPLXXXX', screen: '1000' },
         elements: {
           'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Some other transaction' } },
           'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
@@ -363,6 +395,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
       },
       {
         name: 'va01Initial',
+        context: { transaction: 'VA01', program: 'SAPMV45A', screen: '0101' },
         elements: {
           'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Create Sales Order: Initial Screen' } },
           'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
@@ -376,6 +409,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
       },
       {
         name: 'va01Overview',
+        context: { transaction: 'VA01', program: 'SAPMV45A', screen: '4001' },
         elements: {
           'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Create Standard Order: Overview' } },
           'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
@@ -391,6 +425,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
       },
       {
         name: 'saved',
+        context: { transaction: 'VA01', program: 'SAPMV45A', screen: '4001' },
         status: 'Standard Order 4711 has been saved',
         elements: {
           'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Create Standard Order: Overview' } },

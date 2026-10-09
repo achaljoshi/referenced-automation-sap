@@ -35,7 +35,8 @@
     "test:framework": "playwright test tests/gui",
     "test:sapgui": "playwright test tests/sapgui --grep @sapgui",
     "doctor": "node dist/cli/doctor.js",
-    "try:simulator": "node scripts/try-simulator.js"
+    "try:simulator": "node scripts/try-simulator.js",
+    "insights": "node dist/cli/insights.js report"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.62.1 <2.0.0"
@@ -62,6 +63,7 @@
   "bin": {
     "sap-vbs-to-playwright": "./dist/cli/convertVbs.js",
     "sap-gui-doctor": "./dist/cli/doctor.js",
-    "sap-gui-secret": "./dist/cli/secret.js"
+    "sap-gui-secret": "./dist/cli/secret.js",
+    "sap-gui-insights": "./dist/cli/insights.js"
   }
 }

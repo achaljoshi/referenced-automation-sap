@@ -250,6 +250,21 @@ while ($true) {
                 }
                 Send-Reply $rid $true $info $null $null
             }
+            'context' {
+                $sessionInfo = Get-ComProperty $script:session 'Info' $null
+                $ctx = [ordered]@{
+                    system = [string](Read-Prop $sessionInfo 'SystemName')
+                    client = [string](Read-Prop $sessionInfo 'Client')
+                    user = [string](Read-Prop $sessionInfo 'User')
+                    language = [string](Read-Prop $sessionInfo 'Language')
+                    transaction = [string](Read-Prop $sessionInfo 'Transaction')
+                    program = [string](Read-Prop $sessionInfo 'Program')
+                    screen = [string](Read-Prop $sessionInfo 'ScreenNumber')
+                    responseMs = Read-Prop $sessionInfo 'ResponseTime'
+                    roundTrips = Read-Prop $sessionInfo 'RoundTrips'
+                }
+                Send-Reply $rid $true $ctx $null $null
+            }
             'quit' { Send-Reply $rid $true $null $null $null; exit 0 }
             default { throw ('Unknown op ' + $cmd.op) }
         }

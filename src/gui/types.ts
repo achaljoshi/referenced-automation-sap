@@ -17,6 +17,25 @@ export interface ControlInfo {
   changeable: boolean;
 }
 
+/**
+ * Where SAP is, from the session's own info object: which system, who, and which
+ * transaction / program / screen is showing. Makes a failure say "VA01, screen 4001,
+ * program SAPMV45A" instead of just "control not found".
+ */
+export interface SapContext {
+  system: string;
+  client: string;
+  user: string;
+  language: string;
+  transaction: string;
+  program: string;
+  screen: string;
+  /** SAP's own measure of the last server response, in ms, when the system reports it. */
+  responseMs?: number;
+  /** How many server round trips the session has made. */
+  roundTrips?: number;
+}
+
 /** How to find controls without knowing their technical id: every given field must match. */
 export interface FindCriteria {
   /** Search below this id. Default the main window. */
@@ -51,6 +70,7 @@ export type SapGuiCommand =
   | { op: 'children'; id: string }
   | { op: 'find'; criteria: FindCriteria }
   | { op: 'info'; id: string }
+  | { op: 'context' }
   | { op: 'busy' }
   | { op: 'quit' };
 

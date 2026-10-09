@@ -4,7 +4,7 @@ import { adapterStep, AdapterError, getLogger, type Adapter } from '@automation/
 import { SapGrid, SapTable, SapTree } from './controls';
 import { SapLocator } from './locator';
 import { parseMemberPath } from './memberPath';
-import { SapGuiTransportError, type ControlInfo, type FindCriteria, type SapGuiChild, type SapGuiTransport, type SapGuiValue } from './types';
+import { SapGuiTransportError, type ControlInfo, type SapContext, type FindCriteria, type SapGuiChild, type SapGuiTransport, type SapGuiValue } from './types';
 
 export interface SapGuiSessionOptions {
   /** How long any single step may wait for its element / for SAP to go idle. Default 30s (SAP_GUI_TIMEOUT_MS). */
@@ -15,6 +15,8 @@ export interface SapGuiSessionOptions {
   stablePolls?: number;
   /** 'steps' also takes a screenshot after every step that changes the screen (SAP_GUI_EVIDENCE=steps); evidence you ask for with sap.evidence() is always kept. Default 'off'. */
   evidence?: 'off' | 'steps';
+  /** Ask SAP which transaction/program/screen it is on after each screen change, and attribute every step to it (journal, coverage, response-time baseline, failure messages). One extra call per screen change. Default true. */
+  trackContext?: boolean;
 }
 
 /** One line of the step journal: what the session did, how long it took, whether it worked. */
@@ -25,6 +27,12 @@ export interface JournalEntry {
   ms: number;
   ok: boolean;
   error?: string;
+  /** The transaction / program / screen the step ran in (when context tracking is on). */
+  tx?: string;
+  program?: string;
+  screen?: string;
+  /** For a screen-changing step: SAP's own response time for that round trip, in ms (when SAP reports it). */
+  serverMs?: number;
 }
 
 /** Say what to do when an unexpected pop-up (a modal window, wnd[1]...) appears in front of a step. */
@@ -54,6 +62,7 @@ export class SapGuiElementNotFoundError extends AdapterError {
     readonly siblings: SapGuiChild[],
     readonly statusBar: string,
     cause?: unknown,
+    readonly where?: SapContext,
   ) {
     super(
       'sap-gui',
@@ -66,7 +75,8 @@ export class SapGuiElementNotFoundError extends AdapterError {
               .map((child) => child.id.split('/').pop())
               .join(', ')}${siblings.length > 12 ? ', ...' : ''}`
           : '') +
-        (statusBar ? `. Status bar says: "${statusBar}"` : ''),
+        (statusBar ? `. Status bar says: "${statusBar}"` : '') +
+        (where && (where.transaction || where.program) ? `. SAP is on transaction ${where.transaction || '(none)'}, screen ${where.screen}, program ${where.program}` : ''),
       { cause },
     );
     this.name = 'SapGuiElementNotFoundError';
@@ -120,6 +130,9 @@ export class SapGuiSession implements Adapter {
   readonly pollMs: number;
   private readonly stablePolls: number;
   private readonly evidenceMode: 'off' | 'steps';
+  private readonly trackContext: boolean;
+  private lastContext?: SapContext;
+  private roundTripped = false;
   private readonly journal: JournalEntry[] = [];
   private readonly popupHandlers: PopupHandler[] = [];
   private handlingPopup = false;
@@ -134,6 +147,7 @@ export class SapGuiSession implements Adapter {
     this.pollMs = options.pollMs ?? 100;
     this.stablePolls = options.stablePolls ?? 2;
     this.evidenceMode = options.evidence ?? 'off';
+    this.trackContext = options.trackContext ?? true;
   }
 
   /** Attaches to a SAP Logon connection/session that is already open (the safe default for a shared system - it never creates or closes anyone's session). */
@@ -145,7 +159,9 @@ export class SapGuiSession implements Adapter {
     await adapterStep('sap-gui', 'attach', () => transport.request({ op: 'attach', connectionIndex, sessionIndex }), {
       details: { connectionIndex, sessionIndex },
     });
-    return new SapGuiSession(transport, sessionOptions);
+    const session = new SapGuiSession(transport, sessionOptions);
+    await session.refreshContext();
+    return session;
   }
 
   /** Opens a new connection by its SAP Logon name (e.g. "QR1 - Retail"), landing on its logon screen. If SAP Logon is not running it is started from `logonPath` first. */
@@ -158,7 +174,9 @@ export class SapGuiSession implements Adapter {
     await adapterStep('sap-gui', 'open connection', () => transport.request({ op: 'open', connectionName, connectionString, logonPath }), {
       details: { connectionName: connectionString ? '(connection string)' : connectionName },
     });
-    return new SapGuiSession(transport, sessionOptions);
+    const session = new SapGuiSession(transport, sessionOptions);
+    await session.refreshContext();
+    return session;
   }
 
   // ---------------------------------------------------------------- waiting
@@ -216,7 +234,8 @@ export class SapGuiSession implements Adapter {
     }
     const siblings = (await this.transport.request({ op: 'children', id: nearest }).catch(() => [])) as SapGuiChild[];
     const statusBar = await this.statusBarText().catch(() => '');
-    return new SapGuiElementNotFoundError(id, waitedMs, nearest, siblings, statusBar);
+    const where = await this.refreshContext();
+    return new SapGuiElementNotFoundError(id, waitedMs, nearest, siblings, statusBar, undefined, where);
   }
 
   private async ready(id: string): Promise<void> {
@@ -247,12 +266,15 @@ export class SapGuiSession implements Adapter {
   /** One logged, timed, journaled step. */
   private async step<T>(label: string, id: string, details: Record<string, unknown>, action: () => Promise<T>, level: 'info' | 'debug' = 'info'): Promise<T> {
     const startedAt = Date.now();
+    const where = this.lastContext ? { tx: this.lastContext.transaction, program: this.lastContext.program, screen: this.lastContext.screen } : {};
+    this.roundTripped = false;
     try {
       const result = await adapterStep(this.name, label, action, { level, details });
-      this.record({ at: startedAt, label, id, ms: Date.now() - startedAt, ok: true });
+      const serverMs = this.roundTripped ? this.lastContext?.responseMs : undefined;
+      this.record({ at: startedAt, label, id, ms: Date.now() - startedAt, ok: true, ...where, ...(serverMs !== undefined ? { serverMs } : {}) });
       return result;
     } catch (error) {
-      this.record({ at: startedAt, label, id, ms: Date.now() - startedAt, ok: false, error: error instanceof Error ? error.message : String(error) });
+      this.record({ at: startedAt, label, id, ms: Date.now() - startedAt, ok: false, error: error instanceof Error ? error.message : String(error), ...where });
       throw error;
     }
   }
@@ -296,10 +318,35 @@ export class SapGuiSession implements Adapter {
       const result = await this.withRetry(id, () => this.transport.request({ op: 'call', id, method: name, args, via }));
       if (SERVER_ROUND_TRIP_METHODS.has(name.toLowerCase())) {
         await this.waitUntilIdle();
+        await this.refreshContext();
+        this.roundTripped = true;
         if (this.evidenceMode === 'steps') await this.evidence(`${name} ${id}`);
       }
       return result;
     });
+  }
+
+  // ------------------------------------------------- where SAP is
+
+  /** Which system, user, transaction, program and screen SAP is on right now (and its own response time for the last round trip). */
+  async context(): Promise<SapContext> {
+    return (await this.transport.request({ op: 'context' })) as SapContext;
+  }
+
+  /** The last context we read - cheap, no SAP call. Updated after every screen-changing step. */
+  get currentContext(): SapContext | undefined {
+    return this.lastContext;
+  }
+
+  /** Re-reads the context; never throws (an older SAP GUI may not report everything). */
+  async refreshContext(): Promise<SapContext | undefined> {
+    if (!this.trackContext) return this.lastContext;
+    try {
+      this.lastContext = await this.context();
+    } catch (error) {
+      log.debug(`[sap-gui] could not read the session context: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return this.lastContext;
   }
 
   // ------------------------------------------------- finding controls (Playwright-style)
@@ -422,7 +469,7 @@ export class SapGuiSession implements Adapter {
     const time = (at: number) => new Date(at).toISOString().slice(11, 23);
     return this.journal
       .slice(-limit)
-      .map((e) => `${time(e.at)}  ${e.ok ? 'ok  ' : 'FAIL'}  ${e.label.padEnd(24)} ${e.id.padEnd(48)} ${String(e.ms).padStart(5)}ms${e.error ? `   ${e.error}` : ''}`)
+      .map((e) => `${time(e.at)}  ${e.ok ? 'ok  ' : 'FAIL'}  ${(e.tx ?? '').padEnd(14)} ${e.label.padEnd(24)} ${e.id.padEnd(48)} ${String(e.ms).padStart(5)}ms${e.error ? `   ${e.error}` : ''}`)
       .join('\n');
   }
 

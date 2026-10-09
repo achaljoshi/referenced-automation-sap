@@ -5,6 +5,7 @@ import { test as uiTest } from '@automation/referenced-automation-ui';
 import { getLogger, loadEnv } from '@automation/referenced-automation-utils';
 import { createSampleSapSystem } from './fakeSapGui';
 import { PowerShellTransport } from './powershellTransport';
+import { appendInsight, DEFAULT_INSIGHTS_DIR } from '../insights';
 import { SapGuiSession } from './session';
 import type { SapGuiTransport } from './types';
 
@@ -53,6 +54,15 @@ export class SapConnection {
 
   get reuse(): 'worker' | 'test' {
     return this.options.sapGuiReuse ?? (this.env.get('SAP_GUI_REUSE', 'worker') as 'worker' | 'test');
+  }
+
+  /** Record what each test did in SAP (transactions, step timings) for `sap-gui-insights`. SAP_GUI_INSIGHTS=off disables. */
+  get insights(): boolean {
+    return this.env.get('SAP_GUI_INSIGHTS', 'on') !== 'off';
+  }
+
+  get insightsDir(): string {
+    return this.env.get('SAP_GUI_INSIGHTS_DIR', DEFAULT_INSIGHTS_DIR);
   }
 
   get evidence(): 'off' | 'failure' | 'steps' {
@@ -170,10 +180,32 @@ export const sapGuiTest = uiTest.extend<{ sap: SapGuiSession }, SapGuiOptions & 
       await use(session);
     } finally {
       await attachDiagnostics(session, testInfo, sapConnection.evidence, testInfo.status !== testInfo.expectedStatus);
+      if (sapConnection.insights) recordInsight(session, testInfo, sapConnection.insightsDir);
       if (sapConnection.reuse === 'test') await sapConnection.dispose();
     }
   },
 });
+
+/** Appends this test's SAP activity to the insights file. Never throws. */
+function recordInsight(session: SapGuiSession, testInfo: { titlePath: string[]; status?: string; duration: number }, dir: string): void {
+  try {
+    const where = session.currentContext;
+    appendInsight(
+      {
+        test: testInfo.titlePath.slice(1).join(' > '),
+        status: testInfo.status ?? 'unknown',
+        durationMs: testInfo.duration,
+        system: where?.system,
+        client: where?.client,
+        user: where?.user,
+        steps: session.steps.map((e) => ({ tx: e.tx ?? '', program: e.program, screen: e.screen, label: e.label, ms: e.ms, serverMs: e.serverMs, ok: e.ok })),
+      },
+      dir,
+    );
+  } catch (error) {
+    log.warn(`[sap-gui] could not record insights: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 export type Attacher = { attach(name: string, options: { body?: string; path?: string; contentType: string }): Promise<void> };
 
@@ -188,6 +220,15 @@ export async function attachDiagnostics(session: SapGuiSession, testInfo: Attach
   }
   if (!failed || mode === 'off') return;
 
+  const where = await session.refreshContext().catch(() => undefined);
+  if (where) {
+    await testInfo
+      .attach('sap-context', {
+        body: `system ${where.system}, client ${where.client}, user ${where.user}, language ${where.language}\ntransaction ${where.transaction || '(none)'}, screen ${where.screen}, program ${where.program}`,
+        contentType: 'text/plain',
+      })
+      .catch(() => undefined);
+  }
   const journal = session.journalText();
   if (journal) await testInfo.attach('sap-steps', { body: journal, contentType: 'text/plain' }).catch(() => undefined);
   try {

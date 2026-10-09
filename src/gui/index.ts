@@ -14,3 +14,4 @@ export { SapPage } from './page';
 export type { JournalEntry, PopupMatch } from './session';
 export { SapConnection, attachDiagnostics, type Attacher } from './fixtures';
 export { envSecrets, dpapiSecrets, storeDpapiSecret, resolveSecret, defaultSecretProviders, type SecretProvider } from './secrets';
+export * from '../insights';
