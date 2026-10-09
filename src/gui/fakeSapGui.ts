@@ -433,6 +433,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
     multipleLogon = false,
   } = options;
   const wrongLogin = 'Name or password is incorrect (repeat logon)';
+  let orderCounter = 0; // each save in this system gets the next order number
 
   return new FakeSapGui({
     start: 'logon',
@@ -554,6 +555,10 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
             type: 'GuiCTextField',
             props: { leftLabel: 'Sold-To Party' },
           },
+          'wnd[0]/usr/txtVBKD-BSTKD': {
+            type: 'GuiTextField',
+            props: { leftLabel: 'Customer Reference' },
+          },
           'wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG': { type: 'GuiTableControl' },
           'wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG/ctxtRV45A-MABNR[1,0]': {
             type: 'GuiCTextField',
@@ -572,7 +577,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
       {
         name: 'saved',
         context: { transaction: 'VA01', program: 'SAPMV45A', screen: '4001' },
-        status: 'Standard Order 4711 has been saved',
+        status: () => `Standard Order ${4711 + orderCounter++} has been saved`,
         elements: {
           'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Create Standard Order: Overview' } },
           'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
