@@ -7,12 +7,23 @@ export interface SapCredentials {
   user?: string;
   password?: string;
   language?: string;
+  /**
+   * What to do when SAP says the user is already logged on elsewhere
+   * ("multiple logon" pop-up). 'continue' (default) picks "continue without
+   * ending the other sessions" and presses Continue - what the Java/JACOB
+   * framework's SAPGUI_LoginScreen does. 'fail' stops with a clear message.
+   * Default can be set with SAP_MULTIPLE_LOGON=continue|fail.
+   */
+  onMultipleLogon?: 'continue' | 'fail';
 }
 
 const LOGON_USER_FIELD = 'wnd[0]/usr/txtRSYST-BNAME';
 const LOGON_PASSWORD_FIELD = 'wnd[0]/usr/pwdRSYST-BCODE';
 const LOGON_CLIENT_FIELD = 'wnd[0]/usr/txtRSYST-MANDT';
 const LOGON_LANGUAGE_FIELD = 'wnd[0]/usr/txtRSYST-LANGU';
+// The multiple-logon dialog (same ids the Java framework uses): OPT2 = continue without ending the other sessions.
+const MULTI_LOGON_OPTION = 'wnd[1]/usr/radMULTI_LOGON_OPT2';
+const MULTI_LOGON_CONTINUE = 'wnd[1]/tbar[0]/btn[0]';
 
 /** True when SAP is showing the standard logon screen (user + password fields). */
 export async function isOnLogonScreen(sap: SapGuiSession): Promise<boolean> {
@@ -50,13 +61,19 @@ export async function logon(sap: SapGuiSession, credentials: SapCredentials = {}
   if (language) await sap.setText(LOGON_LANGUAGE_FIELD, language);
   await sap.sendVKey(0);
 
+  const onMultipleLogon = credentials.onMultipleLogon ?? (env.get('SAP_MULTIPLE_LOGON', 'continue') as 'continue' | 'fail');
+  if (onMultipleLogon === 'continue' && (await sap.exists(MULTI_LOGON_OPTION))) {
+    await sap.select(MULTI_LOGON_OPTION);
+    await sap.press(MULTI_LOGON_CONTINUE);
+  }
+
   if (await sap.exists('wnd[1]')) {
     const title = await sap.getText('wnd[1]').catch(() => '(untitled)');
     throw new AdapterError(
       'sap-gui',
       'logon',
-      `SAP showed a pop-up after logon: "${title}". Typical causes: the user is already logged on in another session, ` +
-        `or the password has expired. Run "npm run doctor -- --dump wnd[1]" while it is showing to see what it contains.`,
+      `SAP showed a pop-up after logon: "${title}". Typical causes: the user is already logged on in another session ` +
+        `(set SAP_MULTIPLE_LOGON=continue to handle that), or the password has expired. Run "npm run doctor -- --dump wnd[1]" while it is showing to see what it contains.`,
     );
   }
   if (await isOnLogonScreen(sap)) {

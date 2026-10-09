@@ -42,6 +42,30 @@ test.describe('logon helper', () => {
   });
 });
 
+test.describe('multiple-logon pop-up (user already logged on elsewhere)', () => {
+  const withPopup = () => createSampleSapSystem({ transitionDelayMs: 30, multipleLogon: true });
+
+  test('by default picks "continue without ending the other sessions" and presses Continue - like the Java framework', async () => {
+    const fake = withPopup();
+    const sap = await SapGuiSession.attach(fake, FAST);
+    await logon(sap, good);
+    expect(fake.currentScreen).toBe('easyAccess');
+    const calls = fake.calls.filter((c) => c.id.startsWith('wnd[1]')).map((c) => `${c.name}:${c.id}`);
+    expect(calls).toEqual(['select:wnd[1]/usr/radMULTI_LOGON_OPT2', 'press:wnd[1]/tbar[0]/btn[0]']);
+  });
+
+  test("onMultipleLogon: 'fail' stops with an explanation instead", async () => {
+    const sap = await SapGuiSession.attach(withPopup(), FAST);
+    await expect(logon(sap, { ...good, onMultipleLogon: 'fail' })).rejects.toThrow(/pop-up after logon.*License Information.*SAP_MULTIPLE_LOGON=continue/);
+  });
+
+  test('no pop-up, no extra steps', async () => {
+    const fake = createSampleSapSystem({ transitionDelayMs: 30 });
+    await logon(await SapGuiSession.attach(fake, FAST), good);
+    expect(fake.calls.some((c) => c.id.startsWith('wnd[1]'))).toBe(false);
+  });
+});
+
 test.describe('dumpScreen - "what ids are on this screen?"', () => {
   test('lists controls with their technical ids, types and nesting', async () => {
     const sap = await fresh();

@@ -195,6 +195,8 @@ export interface SampleSapSystemOptions {
   password?: string;
   client?: string;
   transitionDelayMs?: number;
+  /** After a correct logon, show the "user already logged on" pop-up first (like a real system does when the user has another session). */
+  multipleLogon?: boolean;
 }
 
 /**
@@ -204,7 +206,7 @@ export interface SampleSapSystemOptions {
  * own tests.
  */
 export function createSampleSapSystem(options: SampleSapSystemOptions = {}): FakeSapGui {
-  const { user = 'TESTUSER', password = 'correct-horse', client = '100', transitionDelayMs = 150 } = options;
+  const { user = 'TESTUSER', password = 'correct-horse', client = '100', transitionDelayMs = 150, multipleLogon = false } = options;
   const wrongLogin = 'Name or password is incorrect (repeat logon)';
 
   return new FakeSapGui({
@@ -228,8 +230,22 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
             ctx.get('wnd[0]/usr/txtRSYST-BNAME', 'text') === user &&
             ctx.get('wnd[0]/usr/pwdRSYST-BCODE', 'text') === password &&
             ctx.get('wnd[0]/usr/txtRSYST-MANDT', 'text') === client;
-          return ok ? 'easyAccess' : 'logonFailed';
+          return ok ? (multipleLogon ? 'multipleLogon' : 'easyAccess') : 'logonFailed';
         },
+      },
+      {
+        // Real SAP: a dialog (wnd[1]) over the logon window; OPT2 = continue without ending the other sessions.
+        name: 'multipleLogon',
+        elements: {
+          'wnd[0]': { type: 'GuiMainWindow' },
+          'wnd[1]': { type: 'GuiModalWindow', props: { text: 'License Information for Multiple Logons' } },
+          'wnd[1]/usr/radMULTI_LOGON_OPT1': { type: 'GuiRadioButton' },
+          'wnd[1]/usr/radMULTI_LOGON_OPT2': { type: 'GuiRadioButton' },
+          'wnd[1]/usr/radMULTI_LOGON_OPT3': { type: 'GuiRadioButton' },
+          'wnd[1]/tbar[0]/btn[0]': { type: 'GuiButton' },
+          'wnd[0]/sbar': { type: 'GuiStatusbar' },
+        },
+        onPress: { 'wnd[1]/tbar[0]/btn[0]': () => 'easyAccess' },
       },
       {
         name: 'logonFailed',
