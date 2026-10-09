@@ -1,5 +1,6 @@
 import { loadEnv } from '@automation/referenced-automation-utils';
 import { expect, test } from './support/sapTest';
+import { EasyAccessPage } from './pages/EasyAccessPage';
 
 /**
  * STEP 2 - open a transaction and check SAP did not complain.
@@ -7,13 +8,13 @@ import { expect, test } from './support/sapTest';
  */
 test('opens a transaction without an error message @sapgui', async ({ loggedInSap: sap }) => {
   const tcode = loadEnv().get('SAP_SAMPLE_TCODE', 'SU3');
-  const titleBefore = await sap.getText('wnd[0]');
+  const start = new EasyAccessPage(sap);
+  const titleBefore = await start.title();
 
-  await sap.startTransaction(tcode); // waits for the new screen by itself - no sleeps anywhere
+  await start.open(tcode); // waits for the new screen by itself - no sleeps anywhere
 
-  expect(await sap.getText('wnd[0]')).not.toBe(titleBefore);
-
-  // The status bar at the bottom: type E = error, W = warning, S = success, I = info.
-  const messageType = String((await sap.get('wnd[0]/sbar', 'messageType')) ?? '');
-  expect(messageType, `status bar said: "${await sap.statusBarText()}"`).not.toBe('E');
+  // These assertions retry until they hold (or time out), like Playwright's own - no race with the screen change.
+  await expect(sap).not.toHaveTitle(titleBefore);
+  // Status bar message types: S success, W warning, E error. Fail if SAP shows an error.
+  await expect(sap).not.toHaveStatusMessage(/./, { type: 'E' });
 });

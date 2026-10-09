@@ -1,5 +1,6 @@
 import { loadEnv } from '@automation/referenced-automation-utils';
 import { AdapterError } from '@automation/referenced-automation-utils';
+import { resolveSecret } from './secrets';
 import type { SapGuiSession } from './session';
 
 export interface SapCredentials {
@@ -44,14 +45,14 @@ export async function logon(sap: SapGuiSession, credentials: SapCredentials = {}
   const env = loadEnv();
   const client = credentials.client ?? env.getOptional('SAP_CLIENT');
   const user = credentials.user ?? env.getOptional('SAP_USER');
-  const password = credentials.password ?? env.getOptional('SAP_PASSWORD');
+  const password = credentials.password ?? (await resolveSecret('SAP_PASSWORD'));
   const language = credentials.language ?? env.getOptional('SAP_LANGUAGE');
 
   if (!user || !password) {
     throw new AdapterError(
       'sap-gui',
       'logon',
-      `SAP_USER and SAP_PASSWORD must both be set. Put them in .env.${process.env.ENV ?? 'qa'}.local (git ignores that file) or export them - ` +
+      `SAP_USER and SAP_PASSWORD must both be set. Put them in .env.${process.env.ENV ?? 'qa'}.local (git ignores that file), export them, or store the password with "npx sap-gui-secret set SAP_PASSWORD" - ` +
         `currently SAP_USER is ${user ? 'set' : 'EMPTY'} and SAP_PASSWORD is ${password ? 'set' : 'EMPTY'}.`,
     );
   }

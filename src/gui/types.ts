@@ -6,6 +6,31 @@ export interface ChainLink {
   args?: SapGuiValue[];
 }
 
+/** What a control is, in one round trip - the basis for choosing the right action for its type. */
+export interface ControlInfo {
+  /** SAP's class name: GuiButton, GuiTextField, GuiComboBox, GuiCheckBox, GuiTab, ... */
+  type: string;
+  name: string;
+  text: string;
+  tooltip: string;
+  /** False for a read-only field. */
+  changeable: boolean;
+}
+
+/** How to find controls without knowing their technical id: every given field must match. */
+export interface FindCriteria {
+  /** Search below this id. Default the main window. */
+  root: string;
+  text?: string;
+  tooltip?: string;
+  type?: string;
+  name?: string;
+  /** The text of the control's left or right label (what the user sees next to a field). */
+  label?: string;
+  /** Match the whole text instead of "contains". Matching is case-insensitive. */
+  exact?: boolean;
+}
+
 /**
  * Everything the framework ever asks SAP GUI to do, as plain data. The same
  * handful of operations covers the whole SAP GUI Scripting API, because every
@@ -18,12 +43,14 @@ export interface ChainLink {
 export type SapGuiCommand =
   | { op: 'ping' }
   | { op: 'attach'; connectionIndex: number; sessionIndex: number }
-  | { op: 'open'; connectionName: string; logonPath?: string }
+  | { op: 'open'; connectionName: string; connectionString?: string; logonPath?: string }
   | { op: 'exists'; id: string }
   | { op: 'get'; id: string; prop: string; via?: ChainLink[] }
   | { op: 'set'; id: string; prop: string; value: SapGuiValue; via?: ChainLink[] }
   | { op: 'call'; id: string; method: string; args: SapGuiValue[]; via?: ChainLink[] }
   | { op: 'children'; id: string }
+  | { op: 'find'; criteria: FindCriteria }
+  | { op: 'info'; id: string }
   | { op: 'busy' }
   | { op: 'quit' };
 

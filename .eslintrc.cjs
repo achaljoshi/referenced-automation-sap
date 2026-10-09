@@ -42,4 +42,25 @@ module.exports = {
       },
     ],
   },
+  overrides: [
+    {
+      // Layering: a spec says WHAT happens; the technical ids (wnd[0]/usr/...) belong in a page object
+      // (tests/sapgui/pages/). A warning, not an error: a freshly converted recording is full of ids
+      // until someone tidies it up.
+      files: ['tests/sapgui/*.spec.ts'],
+      rules: {
+        'no-restricted-syntax': [
+          'warn',
+          {
+            selector: "Literal[value=/^wnd\\[/]",
+            message: 'Put SAP technical ids in a page object (tests/sapgui/pages/) and use it from the test - one place to fix when a screen changes.',
+          },
+          {
+            selector: "Literal[value='networkidle']",
+            message: "Don't wait for 'networkidle' - wait for the specific element/state you need instead.",
+          },
+        ],
+      },
+    },
+  ],
 };

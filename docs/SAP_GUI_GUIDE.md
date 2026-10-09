@@ -1,5 +1,7 @@
 # SAP GUI automation guide
 
+> Why it is built this way, the alternatives considered and what has been verified: [`ARCHITECTURE.md`](ARCHITECTURE.md). Coming from the Java/JACOB framework: [`MIGRATION_FROM_JAVA.md`](MIGRATION_FROM_JAVA.md).
+
 For testers and developers who need to automate the classic SAP GUI (the Windows client) with Playwright - from "I have never done this" to a running pipeline. The README has the commands; this explains how it fits together and what to do when it doesn't work.
 
 ## 1. How it works
@@ -55,7 +57,11 @@ Settings come from `.env.<name>` (committed, **no secrets**), overridden by `.en
 | `SAP_CLIENT`, `SAP_USER`, `SAP_LANGUAGE` | logon screen values | |
 | `SAP_PASSWORD` | **only in `.env.<name>.local` or a masked CI variable** | |
 | `SAP_GUI_CONNECTION_INDEX` / `SAP_GUI_SESSION_INDEX` | which open connection/session, for `attach` | `0` / `0` |
+| `SAP_GUI_CONNECTION_STRING` | open a system by connection string instead of a SAP Logon entry (`open` mode) | |
 | `SAP_GUI_TIMEOUT_MS` | longest any single step waits | `30000` |
+| `SAP_GUI_REUSE` | `worker` = one session per worker, reset between tests; `test` = a fresh connection per test | `worker` |
+| `SAP_GUI_EVIDENCE` | `off` / `failure` (screenshot + journal on failure) / `steps` (also after every screen change) | `failure` |
+| `SAP_MULTIPLE_LOGON` | `continue` or `fail` when SAP says the user is already logged on | `continue` |
 | `SAP_GUI_LOGON_PATH` | `saplogon.exe`, started in `open` mode if SAP Logon isn't running | `C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe` |
 | `SAP_GUI_POWERSHELL` | path to `powershell.exe`; a 32-bit SAP GUI needs `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe` | `powershell.exe` |
 | `SAP_GUI_SIMULATOR` | `true` = use the built-in fake SAP (any OS) | `false` |
@@ -66,33 +72,99 @@ Settings come from `.env.<name>` (committed, **no secrets**), overridden by `.en
 
 ## 5. Writing tests
 
-Start from `tests/sapgui/`: `01_connect_and_login` (smallest), `02_open_transaction`, `03_create_sales_order.TEMPLATE` plus `support/salesOrder.ts` (a business flow wrapped in functions).
+Start from `tests/sapgui/`: `01_connect_and_login` (smallest), `02_open_transaction`, `03_create_sales_order.TEMPLATE` (a whole flow) with its page objects in `pages/`.
+
+**The rule of thumb: a test says *what* happens; a page object knows *where* (the ids); the framework handles *when* (waiting).**
 
 ```ts
 import { expect, test } from './support/sapTest';
+import { EasyAccessPage } from './pages/EasyAccessPage';
+import { CreateOrderInitialPage } from './pages/SalesOrderPages';
 
-test('display a sales order @sapgui', async ({ loggedInSap: sap }) => {
-  await sap.startTransaction('VA03');
-  await sap.setText('wnd[0]/usr/ctxtVBAK-VBELN', '4711');
-  await sap.sendVKey(0);                     // 0 Enter, 3 Back, 8 Execute, 11 Save, 12 Cancel
-  expect(await sap.statusBarText()).not.toMatch(/does not exist/i);
+test('creates a standard sales order @sapgui', async ({ loggedInSap: sap }) => {
+  await new EasyAccessPage(sap).open('VA01');
+  const initial = await new CreateOrderInitialPage(sap).waitUntilDisplayed();
+  const order = await initial.enter({ type: 'OR', salesOrg: '1000', channel: '10', division: '00' });
+
+  await order.customer.fill('1000');                       // found by its label, "Sold-To Party"
+  await order.addItem(0, { material: 'TG11', quantity: '5' });
+  await sap.evidence('order filled in');                   // screenshot into the test report
+  await order.save.click();                                // found by tooltip, "Save"
+
+  await expect(sap).toHaveStatusMessage(/has been saved/i, { type: 'S' });   // retries until true
 });
 ```
 
-| Call | Does |
-|---|---|
-| `setText(id, value)` / `getText(id)` | type into / read a field |
-| `press(id)` / `select(id)` / `setFocus(id)` | click a button / pick a tab or menu entry / focus |
-| `setSelected(id, bool)` | tick a checkbox or radio button |
-| `sendVKey(n)` | a virtual key to the main window |
-| `startTransaction(tcode)` | like typing `/n<tcode>` + Enter |
-| `statusBarText()` | the message at the bottom of the screen |
-| `exists(id)` | is the control on this screen right now (does not wait) |
-| `get(id, prop)` / `set(id, prop, value)` | any property; `prop` may reach through objects: `'columns.elementAt(1).width'` |
-| `call(id, method, ...args)` | any method of the SAP GUI Scripting API |
-| `logon(sap)` / `ensureLoggedIn(sap)` | the standard logon screen from `SAP_*` variables |
+### Finding controls (locators)
 
-Keep ids in functions (like `support/salesOrder.ts`), not scattered through tests: when SAP changes a screen you fix one place. **Do not add sleeps** - the session already waits.
+| You write | Finds |
+|---|---|
+| `sap.locator('wnd[0]/usr/txtRSYST-BNAME')` | by technical id - what the recorder gives you |
+| `sap.getByLabel('Sold-To Party')` | the input field next to that label |
+| `sap.getByTooltip('Save')` | by tooltip (toolbar buttons) |
+| `sap.getByText('Details')` | by text (buttons, tabs, menu entries) |
+| `sap.getByType('GuiButton')` | by SAP class; add `{ name }` to narrow |
+| `loc.locator('txtX[3,0]')` | a control inside another |
+| `.first()` `.last()` `.nth(i)` | choose on purpose when several match |
+
+Locators are **strict**: if more than one control matches, the action fails and lists them. Text matching is case-insensitive "contains"; pass `{ exact: true }` for the whole text. Ids are always the safest starting point; use label/tooltip/text where an id is unstable or readability matters (labels depend on SAP language and customising).
+
+### Acting - chosen by what the control is
+
+| Call | On a... | Does |
+|---|---|---|
+| `click()` | button | press |
+| | tab, menu entry, radio button | select |
+| | checkbox | toggle |
+| | text field, drop-down | focus |
+| `fill(value)` | text/password field | set the text (passwords are masked in logs) |
+| | drop-down | choose the option (an invalid one fails and says so) |
+| | checkbox / radio | tick (`'X'`, `'true'`) |
+| `check()` `uncheck()` `setChecked(b)` | checkbox | idempotent |
+| `text()` `value()` `tooltip()` `options()` `isChecked()` `isEditable()` `exists()` `count()` | any | read |
+| `press()` `focus()` `sendKey(n)` `get(p)` `set(p, v)` `call(m, ...)` | any | the raw members, when you need them |
+
+`fill()` refuses a read-only field with a message instead of typing into nothing. `fill(value, { checkMaxLength: true })` refuses text longer than the field allows.
+
+### Checking - assertions that wait
+
+```ts
+await expect(sap.getByLabel('Order Number')).toHaveText('4711');     // toContainText, toExist, toBeEditable, toBeChecked
+await expect(sap).toHaveStatusMessage(/saved/i, { type: 'S' });      // S success  E error  W warning  I info  A abort
+await expect(sap).toHaveTitle(/Create Standard Order/);
+await expect(sap).not.toHaveStatusMessage(/./, { type: 'E' });       // no error message
+```
+
+They re-check until they hold or the timeout (default 5 s, `{ timeout }` to change) - SAP changes after a server round trip, so a one-shot read right after an action is a race. Everything from Playwright's `expect` works too (`expect.soft`, `.not`, ...).
+
+### Pop-ups you do not want in every test
+
+```ts
+sap.onPopup('system message', { title: /System Message/ }, (s) => s.press('wnd[1]/tbar[0]/btn[0]'));
+```
+
+Before each step, if a modal window is in front and a handler matches its title, the handler runs. A step aimed at the pop-up (`wnd[1]/...`) is never intercepted; `{ times: 1 }` handles it once; the call returns a function that removes the handler. Handlers are cleared between tests. Put ones every test needs in `tests/sapgui/support/sapTest.ts`.
+
+### Grids, trees, table controls
+
+```ts
+const grid = sap.grid('wnd[0]/usr/cntlGRID1/shellcont/shell');
+await grid.findRow('MATNR', 'TG11');   await grid.cell(0, 'MAKTX');   await grid.rows(['MATNR', 'MAKTX']);
+await grid.selectRows(0, 2);           await grid.doubleClickCell(1, 'MATNR');
+await sap.tree('wnd[0]/usr/cntlTREE/shellcont/shell').doubleClickNode('000012');
+await sap.table('wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG').cell('txtRV45A-KWMENG', 3, 0).fill('5');
+```
+
+### Session lifecycle: reuse, reset, evidence, journal
+
+- **One SAP connection per worker**, reused by its tests. Before each test the session is health-checked (reconnected if SAP went away), modal windows are cancelled, and it returns to the start screen (`/n`). `SAP_GUI_REUSE=test` gives every test a fresh connection.
+- A connection the framework **opened** is ended (`/nex`) when the worker finishes; one you **attached** to is never touched.
+- **Evidence:** `await sap.evidence('label')` attaches a screenshot to the report. `SAP_GUI_EVIDENCE=steps` also captures after every screen-changing step; `off` disables failure diagnostics.
+- **On failure** the report gets `sap-steps` (the step journal: what ran, how long, which step failed and why), `sap-status-bar`, and `sap-screenshot`.
+
+### Credentials
+
+The password is looked up as `SAP_PASSWORD` in this order: real environment variable (CI: use a masked variable) -> `.env.<name>.local` -> a Windows-DPAPI-protected file. Create the last with `npx sap-gui-secret set SAP_PASSWORD` (prompts, hidden): it can be opened only by the same Windows user on the same machine. Nothing stores a key beside a password. See `ARCHITECTURE.md` decision 10.
 
 ### Finding ids
 
@@ -130,7 +202,11 @@ Review the generated header. It lists everything that needs a human.
 | bridge does not start / script blocked | PowerShell execution policy on the machine | `SAP_GUI_POWERSHELL`, or ask IT to allow the printed bridge script (`--print-bridge`) |
 | attaches but every step fails with COM errors | 32-bit SAP GUI with 64-bit PowerShell | set `SAP_GUI_POWERSHELL` to the SysWOW64 `powershell.exe` |
 | a pop-up asks "a script is trying to attach..." and the run hangs | notify options still ticked | section 3, step 1 |
-| `SAP_USER and SAP_PASSWORD must both be set` | credentials not configured | put them in `.env.<name>.local` |
+| `SAP_USER and SAP_PASSWORD must both be set` | credentials not configured | put them in `.env.<name>.local`, export them, or `npx sap-gui-secret set SAP_PASSWORD` |
+| `... is ambiguous: N controls match (...)` | a label/text/tooltip locator matches several controls | narrow it (`type`, `exact`, a more specific label) or `.first()` on purpose |
+| `no control matched label "..."` | wrong label/language, or the screen is not the one you think | `npm run doctor -- --dump`; labels follow the SAP logon language |
+| steps fail because a pop-up is in front | an unexpected modal window | `sap.onPopup(...)` once; see the `sap-steps` attachment to find which step first failed |
+| `could not unprotect ... .dpapi` | the secret file was made by another Windows user or on another machine | run `npx sap-gui-secret set SAP_PASSWORD` as the user that runs the tests |
 | `still on the logon screen ... Status bar: "Name or password is incorrect"` | wrong credentials/client | fix them; watch for locking the user after repeated failures |
 | `SAP showed a pop-up after logon` | already logged on elsewhere, or password expired | `npm run doctor -- --dump "wnd[1]"` while it shows; handle it in your base test |
 | `"wnd[0]/usr/..." not found after 30000ms. Nearest id that does exist ...` | wrong id, or the flow took a different path (an unexpected pop-up or screen) | read the "contains:" list and the status bar text in the message; `--dump` the screen; re-record |

@@ -47,3 +47,6 @@ out/
 .project
 .classpath
 .settings/
+
+# Windows-DPAPI-protected secrets (sap-gui-secret) - never committed
+.secrets/

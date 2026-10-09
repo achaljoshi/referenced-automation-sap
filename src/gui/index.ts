@@ -7,3 +7,10 @@ export { logon, ensureLoggedIn, isOnLogonScreen, type SapCredentials } from './l
 export { dumpScreen, formatScreenDump, type ScreenNode } from './inspect';
 export { BRIDGE_SCRIPT } from './bridgeScript';
 export { parseMemberPath, formatLink, type MemberPath } from './memberPath';
+export { SapLocator } from './locator';
+export { SapGrid, SapTree, SapTable } from './controls';
+export { expect as sapExpect } from './matchers';
+export { SapPage } from './page';
+export type { JournalEntry, PopupMatch } from './session';
+export { SapConnection, attachDiagnostics, type Attacher } from './fixtures';
+export { envSecrets, dpapiSecrets, storeDpapiSecret, resolveSecret, defaultSecretProviders, type SecretProvider } from './secrets';

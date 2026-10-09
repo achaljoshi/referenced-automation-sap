@@ -17,8 +17,12 @@ process.env.SAP_LANGUAGE ??= 'EN';
 export const test = sapGuiTest.extend({
   // A function is only accepted here as a fixture implementation (in an
   // `{ option: true }` slot Playwright would call it as one), so hand it over via use().
-  sapGuiTransport: async ({}, use) => {
-    await use(() => createSampleSapSystem());
-  },
+  // Worker-scoped, like the connection that consumes it.
+  sapGuiTransport: [
+    async ({}, use) => {
+      await use(() => createSampleSapSystem());
+    },
+    { scope: 'worker' },
+  ],
 });
 export { test as sapGuiTest };

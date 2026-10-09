@@ -1,4 +1,5 @@
 import { expect, test } from './support/sapTest';
+import { EasyAccessPage } from './pages/EasyAccessPage';
 
 /**
  * STEP 1 - prove the machine, the connection and the credentials work.
@@ -8,9 +9,9 @@ import { expect, test } from './support/sapTest';
  */
 test('logs on and lands on SAP Easy Access @sapgui @smoke', async ({ loggedInSap: sap }) => {
   // The command field (the box where you type a transaction code) exists on every screen once you're in.
-  expect(await sap.exists('wnd[0]/tbar[0]/okcd')).toBe(true);
+  const start = new EasyAccessPage(sap);
+  await expect(start.commandField).toExist();
 
-  // Reading a property: the main window's title.
-  const title = await sap.getText('wnd[0]');
-  expect(title).not.toBe('');
+  // The main window has a title. (Its wording depends on the SAP language, so only check there is one.)
+  expect(await start.title()).not.toBe('');
 });

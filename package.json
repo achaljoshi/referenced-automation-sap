@@ -61,6 +61,7 @@
   },
   "bin": {
     "sap-vbs-to-playwright": "./dist/cli/convertVbs.js",
-    "sap-gui-doctor": "./dist/cli/doctor.js"
+    "sap-gui-doctor": "./dist/cli/doctor.js",
+    "sap-gui-secret": "./dist/cli/secret.js"
   }
 }

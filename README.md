@@ -72,7 +72,7 @@ SAP GUI's built-in **Script Recording and Playback** writes a VBScript of what y
  recording.vbs --sap-vbs-to-playwright--> recording.spec.ts --playwright test--> SapGuiSession --PowerShell/COM--> SAP GUI
 ```
 
-> The full guide - how it works, configuration, troubleshooting table, CI, limits - is in [`docs/SAP_GUI_GUIDE.md`](docs/SAP_GUI_GUIDE.md).
+> The full guide - how it works, configuration, troubleshooting table, CI, limits - is in [`docs/SAP_GUI_GUIDE.md`](docs/SAP_GUI_GUIDE.md). Design decisions and trade-offs: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Coming from the Java/JACOB framework: [`docs/MIGRATION_FROM_JAVA.md`](docs/MIGRATION_FROM_JAVA.md).
 
 ### Getting started with SAP GUI (first time, from zero)
 
@@ -100,26 +100,24 @@ npm run try:simulator            # runs tests/sapgui/*.spec.ts against the fake 
 |---|---|
 | `01_connect_and_login.spec.ts` | the smallest test: the `loggedInSap` fixture logs on for you; read a window title; check a control exists |
 | `02_open_transaction.spec.ts` | `startTransaction`, reading the status bar (`E` = error), configuring a test from `.env` |
-| `03_create_sales_order.TEMPLATE.spec.ts` + `support/salesOrder.ts` | a business flow as a few functions ("page object") around the ids; table-control cells; save and read the confirmation |
+| `03_create_sales_order.TEMPLATE.spec.ts` + `pages/` | a business flow written with page objects: ids in one place, label/tooltip locators, table-control cells, a pop-up handler, evidence, a retrying status-bar assertion |
 
-**How to write your own test** - copy one and use these (every call waits for SAP by itself; never add a sleep):
+**How to write your own test** - copy a sample and use these (every call waits for SAP by itself; never add a sleep):
 
 ```ts
 import { expect, test } from './support/sapTest';
 
 test('my flow @sapgui', async ({ loggedInSap: sap }) => {
-  await sap.startTransaction('VA03');                         // like typing /nVA03 + Enter
-  await sap.setText('wnd[0]/usr/ctxtVBAK-VBELN', '4711');     // type into a field
-  await sap.sendVKey(0);                                      // Enter   (3 = Back, 11 = Save, 8 = Execute, 12 = Cancel)
-  await sap.press('wnd[0]/tbar[1]/btn[7]');                   // click a button
-  await sap.setSelected('wnd[0]/usr/chkX', true);             // tick a checkbox
-  await sap.select('wnd[0]/usr/tabsTAB/tabpT1');              // select a tab / menu item
-  const status = await sap.statusBarText();                   // message at the bottom of the screen
-  const value = await sap.getText('wnd[0]/usr/txtFIELD');     // read a field
-  expect(status).toMatch(/saved/i);
-  await sap.call('wnd[0]/usr/tblX', 'someMethod', 1, 'arg');  // anything else the SAP GUI scripting API offers
+  await sap.startTransaction('VA03');                              // like typing /nVA03 + Enter
+  await sap.getByLabel('Order').fill('4711');                      // find a field by the label you see
+  await sap.sendVKey(0);                                           // Enter   (3 Back, 8 Execute, 11 Save, 12 Cancel)
+  await sap.getByTooltip('Display').click();                       // click picks press / select / toggle by control type
+  await expect(sap).toHaveStatusMessage(/saved/i, { type: 'S' });  // assertions retry until true
+  await sap.evidence('order displayed');                           // screenshot into the report
 });
 ```
+
+Put the ids in a page object (`tests/sapgui/pages/`) once you have more than a couple - a lint warning reminds you. The full list of locators, actions, assertions, grids/trees and pop-up handlers is in [`docs/SAP_GUI_GUIDE.md`](docs/SAP_GUI_GUIDE.md#5-writing-tests).
 
 **Finding the ids** (the `wnd[0]/usr/...` strings) - two ways, no guessing:
 - **Record it:** with SAP GUI's own *Script Recording and Playback* (in the **Alt+F12** menu), record yourself doing the flow, save the `.vbs`, drop it in `recordings/` and run `npm run convert` (below). You get a finished test.
@@ -217,7 +215,7 @@ It only knows the screens it is given - it proves the converter and the waiting,
 
 ### What has and has not been verified
 
-Verified here (macOS, no SAP): the parser/generator (53 tests incl. the VA01 sample), the session's waiting and diagnostics against a simulator with screen-change latency, password handling, the CLI, and that the bridge script is ASCII-only and contains no network/file/registry calls.
+Verified here (macOS, no SAP): every layer above the transport - parser/generator (including a realistic VA01 recording), the session's waiting, retries and error messages, locators, type-driven actions, retrying assertions, pop-up handlers, journal/evidence, session reuse, secrets handling, the CLI - against a simulator with screen-change latency, with negative controls showing the same steps fail without the framework. The bridge script is checked to be ASCII-only with no network/file/registry calls (its only `Start-Process` is the SAP Logon launch).
 
 **Not verified until it runs on a Windows machine with SAP GUI**: the PowerShell bridge itself (it could not be executed without Windows PowerShell and SAP GUI), COM behaviour on your SAP release, and that a particular recording replays against your system. Run `npm run doctor` first, then convert and run one real recording - and report anything the doctor or the failure message does not explain, because that is the part that was written from the documented COM API rather than observed.
 

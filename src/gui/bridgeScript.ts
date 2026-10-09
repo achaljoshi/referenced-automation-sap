@@ -84,6 +84,57 @@ function Get-ScriptingEngine($logonPath) {
     throw 'Started SAP Logon but its scripting engine did not appear within 60 seconds. Is scripting enabled (SAP GUI Options > Accessibility and Scripting > Scripting)?'
 }
 
+function Read-Prop($target, $name) {
+    try { return Convert-Out (Get-ComProperty $target $name $null) } catch { return $null }
+}
+
+function Read-LabelText($target, $labelProp) {
+    try {
+        $label = Get-ComProperty $target $labelProp $null
+        if ($null -ne $label) { return [string](Get-ComProperty $label 'Text' $null) }
+    } catch { }
+    return $null
+}
+
+function Test-Text($actual, $expected, $exact) {
+    if ($null -eq $expected) { return $true }
+    $a = ([string]$actual).Trim()
+    $e = ([string]$expected).Trim()
+    if ($exact) { return ($a -eq $e) }
+    return ($a.IndexOf($e, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+function Test-Control($node, $c) {
+    if ($null -ne $c.type -and ([string](Read-Prop $node 'Type')) -ne [string]$c.type) { return $false }
+    if ($null -ne $c.name -and ([string](Read-Prop $node 'Name')) -ne [string]$c.name) { return $false }
+    if (-not (Test-Text (Read-Prop $node 'Text') $c.text $c.exact)) { return $false }
+    if (-not (Test-Text (Read-Prop $node 'Tooltip') $c.tooltip $c.exact)) { return $false }
+    if ($null -ne $c.label) {
+        $left = Read-LabelText $node 'LeftLabel'
+        $right = Read-LabelText $node 'RightLabel'
+        if (-not ((Test-Text $left $c.label $c.exact) -and ($null -ne $left)) -and -not ((Test-Text $right $c.label $c.exact) -and ($null -ne $right))) { return $false }
+    }
+    return $true
+}
+
+# Depth- and size-bounded walk so a huge screen cannot hang the bridge.
+function Search-Controls($node, $c, $results, $depth) {
+    if ($depth -gt 14 -or $script:visited -gt 3000) { return }
+    $kids = $null
+    $count = 0
+    try {
+        $kids = Get-ComProperty $node 'Children' $null
+        if ($null -eq $kids) { return }
+        $count = [int](Get-ComProperty $kids 'Count' $null)
+    } catch { return }
+    for ($i = 0; $i -lt $count; $i++) {
+        $script:visited++
+        $kid = Invoke-Com $kids 'ElementAt' ([object[]]@($i))
+        if (Test-Control $kid $c) { [void]$results.Add([string](Get-ComProperty $kid 'Id' $null)) }
+        Search-Controls $kid $c $results ($depth + 1)
+    }
+}
+
 function Find-Element($id) {
     if ([string]::IsNullOrEmpty($id)) { return ,$script:session }
     return ,(Invoke-Com $script:session 'FindById' ([object[]]@($id)))
@@ -134,7 +185,11 @@ while ($true) {
             }
             'open' {
                 $engine = Get-ScriptingEngine ([string]$cmd.logonPath)
-                $connection = Invoke-Com $engine 'OpenConnection' ([object[]]@([string]$cmd.connectionName))
+                if (-not [string]::IsNullOrEmpty([string]$cmd.connectionString)) {
+                    $connection = Invoke-Com $engine 'OpenConnectionByConnectionString' ([object[]]@([string]$cmd.connectionString))
+                } else {
+                    $connection = Invoke-Com $engine 'OpenConnection' ([object[]]@([string]$cmd.connectionName))
+                }
                 $script:session = Get-ComProperty $connection 'Children' ([object[]]@(0))
                 Send-Reply $rid $true $null $null $null
             }
@@ -175,6 +230,25 @@ while ($true) {
                     })
                 }
                 Send-Reply $rid $true $items.ToArray() $null $null
+            }
+            'find' {
+                $root = Find-Element $cmd.criteria.root
+                $results = New-Object System.Collections.ArrayList
+                $script:visited = 0
+                Search-Controls $root $cmd.criteria $results 0
+                Send-Reply $rid $true $results.ToArray() $null $null
+            }
+            'info' {
+                $target = Find-Element $cmd.id
+                $changeable = Read-Prop $target 'Changeable'
+                $info = [ordered]@{
+                    type = [string](Read-Prop $target 'Type')
+                    name = [string](Read-Prop $target 'Name')
+                    text = [string](Read-Prop $target 'Text')
+                    tooltip = [string](Read-Prop $target 'Tooltip')
+                    changeable = ($changeable -ne $false)
+                }
+                Send-Reply $rid $true $info $null $null
             }
             'quit' { Send-Reply $rid $true $null $null $null; exit 0 }
             default { throw ('Unknown op ' + $cmd.op) }
