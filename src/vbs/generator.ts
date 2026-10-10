@@ -1,4 +1,8 @@
+import { identifier, quote } from './names';
+import { Objects } from './objects';
 import { parseVbs, type Expr, type ParseWarning, type Step } from './parser';
+
+export { identifier, quote } from './names';
 
 /**
  * Replaces a recorded literal with a read from the environment. A recording
@@ -36,6 +40,12 @@ export interface GenerateOptions {
   params?: ParamRule[];
   /** Add `// vbs:<line>` after each statement to trace it back to the recording. Default true. */
   lineComments?: boolean;
+  /**
+   * By default the test starts with CONSTANTS (every typed value; secrets and settings as environment getters) and LOCATORS
+   * (every control id, named once) and the steps only refer to them - a changed input or screen is one edit at the top.
+   * `inline` writes ids and values in the steps instead.
+   */
+  inline?: boolean;
 }
 
 export interface Generated {
@@ -43,23 +53,11 @@ export interface Generated {
   code: string;
   /** Just the statements inside the test body - valid plain JavaScript, so a unit test can execute exactly what was generated. */
   body: string[];
+  /** The CONSTANTS / LOCATORS objects the body refers to (empty with `inline`) - plain JavaScript too: run `[...preamble, ...body]`. */
+  preamble: string[];
   warnings: ParseWarning[];
   /** The environment variables the generated test reads. */
   envVars: string[];
-}
-
-export function quote(value: string): string {
-  return `'${value
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "\\'")
-    .replace(/\r/g, '\\r')
-    .replace(/\n/g, '\\n')
-    .replace(/\t/g, '\\t')}'`;
-}
-
-const RESERVED = new Set(['default', 'new', 'class', 'function', 'var', 'let', 'const', 'delete', 'in', 'of', 'with', 'switch', 'case', 'sap', 'env', 'test']);
-export function identifier(name: string): string {
-  return RESERVED.has(name) ? `${name}_` : name;
 }
 
 export function renderExpr(expr: Expr): string {
@@ -85,8 +83,12 @@ export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], 
   const stripPrefix = options.stripSessionPrefix ?? true;
   const lineComments = options.lineComments ?? true;
   const body: string[] = [];
+  const objects = options.inline ? undefined : new Objects();
 
-  const idOf = (id: string) => quote(stripPrefix ? id.replace(/^\/app\/con\[\d+\]\/ses\[\d+\]\//i, '') : id);
+  const idOf = (id: string) => {
+    const stripped = stripPrefix ? id.replace(/^\/app\/con\[\d+\]\/ses\[\d+\]\//i, '') : id;
+    return objects ? objects.locator(stripped) : quote(stripped);
+  };
   const trace = (line: number) => (lineComments ? ` // vbs:${line}` : '');
   const emit = (code: string, line: number) => body.push(`${code}${trace(line)}`);
 
@@ -97,10 +99,13 @@ export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], 
         envVars.add(rule.envVar);
         if (rule.secret) {
           warnings.push({ line, message: `the recorded value for "${id}" was replaced with env ${rule.envVar} - it is not in the generated file` });
-          return `env.get(${quote(rule.envVar)})`;
+          const read = `env.get(${quote(rule.envVar)})`;
+          return objects ? objects.fromEnv(id, read) : read;
         }
-        return `env.get(${quote(rule.envVar)}, ${quote(value.value)})`;
+        const read = `env.get(${quote(rule.envVar)}, ${quote(value.value)})`;
+        return objects ? objects.fromEnv(id, read) : read;
       }
+      if (objects && value.value !== '') return objects.input(id, value.value);
     }
     return renderExpr(value);
   };
@@ -147,7 +152,9 @@ export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], 
         const assign = step.into ? `${declared.has(identifier(step.into)) ? '' : 'let '}${identifier(step.into)} = ` : '';
         if (step.into) declared.add(identifier(step.into));
         if (!step.into && step.id === '' && m === 'starttransaction' && args.length === 1) {
-          emit(`await sap.startTransaction(${args[0]});`, step.line);
+          const first = step.args[0];
+          const transaction = objects && first?.kind === 'string' && first.value !== '' ? objects.named('transaction', first.value) : args[0];
+          emit(`await sap.startTransaction(${transaction});`, step.line);
         } else if (!step.into && m === 'sendvkey' && args.length === 1) {
           emit(
             step.id.replace(/^\/app\/con\[\d+\]\/ses\[\d+\]\//i, '') === 'wnd[0]'
@@ -167,6 +174,7 @@ export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], 
 
   const tag = options.tag ?? '@sapgui';
   const usesEnv = envVars.size > 0;
+  const preamble = objects ? objects.block() : [];
   const header = [
     '/**',
     ` * Converted from ${options.sourceName ?? 'a SAP GUI Scripting recording'} by sap-vbs-to-playwright.`,
@@ -180,6 +188,7 @@ export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], 
     `import { sapGuiTest as test } from ${quote(options.testImport ?? '@automation/referenced-automation-sap')};`,
     ...(usesEnv ? ["import { loadEnv } from '@automation/referenced-automation-utils';", '', 'const env = loadEnv();'] : []),
     '',
+    ...preamble,
     ...header,
     `test(${quote(`${options.testName} ${tag}`.trim())}, async ({ sap }) => {`,
     ...body.map((line) => `  ${line}`),
@@ -187,7 +196,7 @@ export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], 
     '',
   ].join('\n');
 
-  return { code, body, warnings, envVars: [...envVars] };
+  return { code, body, preamble, warnings, envVars: [...envVars] };
 }
 
 /** VBScript recording in, Playwright spec out. */

@@ -1,9 +1,7 @@
 import * as path from 'node:path';
 import { sapGuiTest as test } from '../sapFakeTest';
-import { csvUtils, loadEnv } from '@automation/referenced-automation-utils';
-import { Va01CreateOrderFrame, Va01CreateOrderScreen1Page, Va01CreateOrderScreen2Page, Va01CreateOrderScreen3Page } from './pages/Va01CreateOrderPages';
-
-const env = loadEnv();
+import { csvUtils } from '@automation/referenced-automation-utils';
+import { CONSTANTS, LOCATORS, Va01CreateOrderFrame, Va01CreateOrderScreen1Page, Va01CreateOrderScreen2Page, Va01CreateOrderScreen3Page } from './pages/Va01CreateOrderPages';
 
 const rows = csvUtils.parseCsvFile(path.join(__dirname, 'va01_create_order.data.csv'));
 
@@ -18,7 +16,7 @@ function field(row: Record<string, string>, column: string): string {
  * Converted from examples/va01_create_order.vbs by sap-vbs-to-playwright (page-object mode).
  * Review before committing:
  *  - reads SAP_CLIENT, SAP_USER, SAP_PASSWORD, SAP_LANGUAGE from the environment (.env.<name> / CI variables); none of those values is stored here
- *  - the ids are in ./pages/Va01CreateOrderPages.ts; the page and property names are mechanical - rename them
+ *  - every typed value (CONSTANTS) and every id (LOCATORS) is at the top of ./pages/Va01CreateOrderPages.ts: change them there; the page and property names are mechanical - rename them
  *  - no waits are needed: every step waits for SAP to be idle and for its control to exist
  *  - one test runs per row of va01_create_order.data.csv; the first row holds the values that were recorded
  *  - line 18: the recorded value for "wnd[0]/usr/pwdRSYST-BCODE" was replaced with env SAP_PASSWORD - it is not in the generated files
@@ -26,11 +24,11 @@ function field(row: Record<string, string>, column: string): string {
 for (const [index, data] of rows.entries()) {
   test(`recorded: va01_create_order @sapgui-sample [row ${index + 1}]`, async ({ sap }) => {
     const screen1 = await new Va01CreateOrderScreen1Page(sap).waitUntilDisplayed();
-    await sap.locator('wnd[0]').call('maximize'); // vbs:15
-    await screen1.rsystMandt.fill(env.get('SAP_CLIENT', '100')); // vbs:16
-    await screen1.rsystBname.fill(env.get('SAP_USER', 'TESTUSER')); // vbs:17
-    await screen1.rsystBcode.fill(env.get('SAP_PASSWORD')); // vbs:18
-    await screen1.rsystLangu.fill(env.get('SAP_LANGUAGE', 'EN')); // vbs:19
+    await sap.locator(LOCATORS.mainWindow).call('maximize'); // vbs:15
+    await screen1.logonClient.fill(CONSTANTS.inputs.logonClient); // vbs:16
+    await screen1.logonUser.fill(CONSTANTS.inputs.logonUser); // vbs:17
+    await screen1.logonPassword.fill(CONSTANTS.inputs.logonPassword); // vbs:18
+    await screen1.logonLanguage.fill(CONSTANTS.inputs.logonLanguage); // vbs:19
     await sap.sendVKey(0); // vbs:20
     const frame2 = await new Va01CreateOrderFrame(sap).waitUntilDisplayed();
     await frame2.commandField.fill(field(data, 'okcd')); // vbs:21

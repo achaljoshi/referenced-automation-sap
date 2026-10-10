@@ -17,6 +17,13 @@ import { CreateOrderInitialPage } from './pages/SalesOrderPages';
  * It always runs against the built-in simulator (SAP_GUI_SIMULATOR=true).
  */
 const env = loadEnv();
+
+/** What this flow types and expects: change a value here and every step that uses it follows (the converters write the same shape). */
+const CONSTANTS = {
+  order: { type: 'OR', salesOrg: '1000', channel: '10', division: '00', customer: '1000', item: { material: 'TG11', quantity: '5' } },
+  expected: { saved: /has been saved/i },
+};
+
 test.skip(
   !env.getBoolean('SAP_GUI_SIMULATOR', false) && !env.getBoolean('SAP_RUN_TEMPLATES', false),
   'template - adapt pages/SalesOrderPages.ts to your system, then set SAP_RUN_TEMPLATES=true',
@@ -29,13 +36,14 @@ test('creates a standard sales order @sapgui @template', async ({ loggedInSap: s
   await new EasyAccessPage(sap).open('VA01');
 
   const initial = await new CreateOrderInitialPage(sap).waitUntilDisplayed();
-  const order = await initial.enter({ type: 'OR', salesOrg: '1000', channel: '10', division: '00' });
+  const { type, salesOrg, channel, division, customer, item } = CONSTANTS.order;
+  const order = await initial.enter({ type, salesOrg, channel, division });
 
-  await order.customer.fill('1000');
-  await order.addItem(0, { material: 'TG11', quantity: '5' });
+  await order.customer.fill(customer);
+  await order.addItem(0, item);
   await sap.evidence('order filled in'); // a screenshot that goes into the test report
   await order.save.click();
 
-  await expect(sap).toHaveStatusMessage(/has been saved/i, { type: 'S' });
+  await expect(sap).toHaveStatusMessage(CONSTANTS.expected.saved, { type: 'S' });
   await sap.evidence('order saved');
 });

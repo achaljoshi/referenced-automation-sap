@@ -20,6 +20,10 @@ Options:
   --tag <tag>             Tag added to the test title. Default: @sapgui.
   --keep-session-prefix   Keep the recorder's /app/con[0]/ses[0]/ id prefix.
   --no-line-comments      Don't add "// vbs:<line>" trace comments.
+  --inline                Write ids and values where they are used. By default the test starts with CONSTANTS (every typed value;
+                          secrets as environment getters) and LOCATORS (every control id, named once) and the steps only refer to them,
+                          so a changed input or screen is one edit at the top. Ignored with --page-objects, where the same two
+                          objects are at the top of the pages file.
   --page-objects          Generate page objects (one class per screen, ids in one place) plus a test that uses them,
                           instead of one flat script. Written to <out>/pages/<Name>Pages.ts.
   --data                  Make every literal typed in the recording a column of <name>.data.csv and run one test per row
@@ -40,6 +44,7 @@ function parseArgs(argv: string[]) {
     lineComments: true,
     strict: false,
     pageObjects: false,
+    inline: false,
     data: false,
     sapImport: undefined as string | undefined,
   };
@@ -59,6 +64,7 @@ function parseArgs(argv: string[]) {
     else if (arg === '--keep-session-prefix') opts.keepPrefix = true;
     else if (arg === '--no-line-comments') opts.lineComments = false;
     else if (arg === '--strict') opts.strict = true;
+    else if (arg === '--inline') opts.inline = true;
     else if (arg === '--page-objects') opts.pageObjects = true;
     else if (arg === '--data') {
       opts.data = true;
@@ -111,6 +117,7 @@ function main(): void {
       stripSessionPrefix: !opts.keepPrefix,
       params: opts.params,
       lineComments: opts.lineComments,
+      inline: opts.inline,
     };
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     let result: { warnings: Array<{ line: number; message: string }>; envVars: string[] };

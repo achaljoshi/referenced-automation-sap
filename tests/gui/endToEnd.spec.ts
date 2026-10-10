@@ -14,12 +14,12 @@ const sampleEnv = (values: Record<string, string>) => ({ get: (key: string, fall
 
 test.describe('a recording, converted, runs to completion', () => {
   test('the generated statements execute against the simulated SAP and create the order', async () => {
-    const { body } = convertVbs(fs.readFileSync(recording, 'utf8'), { testName: 'e2e' });
+    const { body, preamble } = convertVbs(fs.readFileSync(recording, 'utf8'), { testName: 'e2e' });
     const fake = createSampleSapSystem({ transitionDelayMs: 100 });
     const sap = await SapGuiSession.attach(fake, { timeoutMs: 5_000, pollMs: 10 });
 
-    // executing exactly the generated lines - the same code the spec file contains
-    await new AsyncFunction('sap', 'env', body.join('\n'))(sap, sampleEnv({ SAP_PASSWORD: 'correct-horse' }));
+    // executing exactly the generated lines - CONSTANTS, LOCATORS and the steps, the same code the spec file contains
+    await new AsyncFunction('sap', 'env', [...preamble, ...body].join('\n'))(sap, sampleEnv({ SAP_PASSWORD: 'correct-horse' }));
 
     expect(fake.currentScreen).toBe('saved');
     expect(await sap.statusBarText()).toBe('Standard Order 4711 has been saved');
@@ -32,11 +32,11 @@ test.describe('a recording, converted, runs to completion', () => {
   });
 
   test('a run with the wrong password stops at the logon screen and says why', async () => {
-    const { body } = convertVbs(fs.readFileSync(recording, 'utf8'), { testName: 'e2e' });
+    const { body, preamble } = convertVbs(fs.readFileSync(recording, 'utf8'), { testName: 'e2e' });
     const fake = createSampleSapSystem({ transitionDelayMs: 20 });
     const sap = await SapGuiSession.attach(fake, { timeoutMs: 500, pollMs: 10 });
 
-    const failure = await new AsyncFunction('sap', 'env', body.join('\n'))(sap, sampleEnv({ SAP_PASSWORD: 'wrong' })).catch((e: unknown) => e);
+    const failure = await new AsyncFunction('sap', 'env', [...preamble, ...body].join('\n'))(sap, sampleEnv({ SAP_PASSWORD: 'wrong' })).catch((e: unknown) => e);
 
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).toContain('not found');

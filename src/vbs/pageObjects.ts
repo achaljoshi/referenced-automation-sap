@@ -1,11 +1,8 @@
-import {
-  DEFAULT_PARAM_RULES,
-  identifier,
-  quote,
-  renderExpr,
-  type GenerateOptions,
-  type ParamRule,
-} from './generator';
+import { DEFAULT_PARAM_RULES, renderExpr, type GenerateOptions, type ParamRule } from './generator';
+import { COMMAND_FIELD, identifier, propertyName, quote, SESSION_PREFIX, STATUS_BAR, TABLE_CELL, TOOLBAR_BUTTON } from './names';
+import { Objects } from './objects';
+
+export { propertyName } from './names';
 import { parseVbs, type Expr, type ParseWarning, type Step } from './parser';
 
 export interface PageObjectOptions extends GenerateOptions {
@@ -32,7 +29,6 @@ export interface PageObjectResult {
   screens: Array<{ className: string; marker: string; controls: string[] }>;
 }
 
-const SESSION_PREFIX = /^\/app\/con\[\d+\]\/ses\[\d+\]\//i;
 // A step that sends SAP to a new screen: what the recorded script does next belongs to the next page.
 // `select` is deliberately not one: tabs and radio buttons change nothing server-side.
 const SCREEN_CHANGING = new Set([
@@ -49,13 +45,6 @@ const SCREEN_CHANGING = new Set([
   'selectcontextmenuitem',
   'close',
 ]);
-const COMMAND_FIELD = 'wnd[0]/tbar[0]/okcd';
-const STATUS_BAR = 'wnd[0]/sbar';
-const TOOLBAR_BUTTON = /^wnd\[0\]\/tbar\[[01]\]\/btn\[(\d+)\]$/;
-const TABLE_CELL = /^(.*)\/([^/]+)\[(\d+),(\d+)\]$/;
-const TYPE_PREFIX =
-  /^(ctxt|txt|pwd|chk|rad|btn|cmb|tabp|tabs|tbl|lbl|menu|mbar|ssub|sub|cntl|shellcont|shell|titl|tbar|sbar|usr|okcd)(?=[A-Z0-9_-])/;
-
 const pascal = (text: string) =>
   text
     .replace(/[^A-Za-z0-9]+/g, ' ')
@@ -64,24 +53,6 @@ const pascal = (text: string) =>
     .filter(Boolean)
     .map((w) => w[0]?.toUpperCase() + w.slice(1))
     .join('');
-
-function camel(text: string): string {
-  const words = text.split(/[^A-Za-z0-9]+/).filter(Boolean);
-  const name = words
-    .map((w, i) =>
-      i === 0 ? w.toLowerCase() : (w[0]?.toUpperCase() ?? '') + w.slice(1).toLowerCase(),
-    )
-    .join('');
-  const safe = /^[0-9]/.test(name) ? `_${name}` : name;
-  return identifier(safe || 'control');
-}
-
-/** `wnd[0]/usr/ctxtVBAK-AUART` -> `vbakAuart`. */
-export function propertyName(id: string): string {
-  const last = (id.split('/').pop() ?? id).replace(/\[.*$/, '');
-  const stripped = last.replace(TYPE_PREFIX, '');
-  return camel(stripped || last);
-}
 
 interface Segment {
   index: number;
@@ -109,6 +80,10 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
   const rules: ParamRule[] = [...(options.params ?? []), ...DEFAULT_PARAM_RULES];
   const base = pascal(options.baseName) || 'Recording';
   const envVars = new Set<string>();
+  // The pages file starts with CONSTANTS (typed values, secrets as environment getters) and LOCATORS (every id, named once).
+  const objects = new Objects();
+  objects.locator(COMMAND_FIELD); // the base class reads these two
+  objects.locator(STATUS_BAR);
 
   // Tables: anything that has `field[col,row]` cells under it, or is named like a table control (tbl...).
   const tableIds = new Set<string>();
@@ -136,13 +111,10 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
       const cell = TABLE_CELL.exec(id);
       const key = cell ? (cell[1] as string) : id;
       if (!segment.controls.has(key)) {
-        const taken = new Set([...segment.controls.values()].map((c) => c.prop));
         const kind = tableIds.has(key) || /\/tbl[A-Z0-9_]*$/.test(key) ? 'table' : 'control';
-        let prop = propertyName(key);
-        if (kind === 'table') prop = `${prop}Table`;
-        for (let n = 2; taken.has(prop); n++)
-          prop = `${propertyName(key)}${kind === 'table' ? 'Table' : ''}${n}`;
-        segment.controls.set(key, { prop, kind, id: key });
+        // named once for the whole recording (the same control on two screens keeps its name)
+        const name = objects.locatorKey(key);
+        segment.controls.set(key, { prop: kind === 'table' ? `${name}Table` : name, kind, id: key });
       }
     }
     if (
@@ -209,7 +181,7 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
             : `${currentVar}.${control.prop}`,
       };
     }
-    return { expr: `sap.locator(${quote(id)})` }; // a pop-up, the status bar, or a control outside any page
+    return { expr: `sap.locator(${objects.locator(id)})` }; // a pop-up, the status bar, or a control outside any page
   };
 
   const valueFor = (id: string, value: Expr, line: number): string => {
@@ -222,15 +194,16 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
             line,
             message: `the recorded value for "${id}" was replaced with env ${rule.envVar} - it is not in the generated files`,
           });
-          return `env.get(${quote(rule.envVar)})`;
+          return objects.fromEnv(id, `env.get(${quote(rule.envVar)})`);
         }
-        return `env.get(${quote(rule.envVar)}, ${quote(value.value)})`;
+        return objects.fromEnv(id, `env.get(${quote(rule.envVar)}, ${quote(value.value)})`);
       }
       if (options.dataDriven) {
         const col = columnFor(id);
         dataRow[col] = value.value;
         return `field(data, ${quote(col)})`;
       }
+      if (value.value !== '') return objects.input(id, value.value);
     }
     return renderExpr(value);
   };
@@ -305,13 +278,19 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
             ? `${declared.has(identifier(step.into)) ? '' : 'let '}${identifier(step.into)} = `
             : '';
           if (step.into) declared.add(identifier(step.into));
-          if (!step.into && id === '' && m === 'starttransaction' && args.length === 1)
-            body.push(`await sap.startTransaction(${args[0]});${trace(step.line)}`);
+          if (!step.into && id === '' && m === 'starttransaction' && args.length === 1) {
+            const first = step.args[0];
+            const transaction =
+              !options.dataDriven && first?.kind === 'string' && first.value !== ''
+                ? objects.named('transaction', first.value)
+                : args[0];
+            body.push(`await sap.startTransaction(${transaction});${trace(step.line)}`);
+          }
           else if (!step.into && m === 'sendvkey' && args.length === 1) {
             body.push(
               id === 'wnd[0]'
                 ? `await sap.sendVKey(${args[0]});${trace(step.line)}`
-                : `await sap.sendVKey(${args[0]}, ${quote(id)});${trace(step.line)}`,
+                : `await sap.sendVKey(${args[0]}, ${objects.locator(id)});${trace(step.line)}`,
             );
           } else if (!step.into && args.length === 0 && id !== '' && m === 'press')
             body.push(`await ${access(id, current).expr}.press();${trace(step.line)}`);
@@ -336,20 +315,23 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
   // ---- 4. the pages file
   const sapImport = options.sapImport ?? '@automation/referenced-automation-sap';
   const pageClasses = segments.filter((s) => s.className);
+  const pagesUseEnv = envVars.size > 0;
   const pagesCode = [
+    ...(pagesUseEnv ? ["import { loadEnv } from '@automation/referenced-automation-utils';"] : []),
     `import { SapPage } from ${quote(sapImport)};`,
     '',
+    ...(pagesUseEnv ? ['const env = loadEnv();', ''] : []),
+    ...objects.block({ exported: true }),
     '/**',
     ` * Page objects generated from ${options.sourceName ?? 'a SAP GUI Scripting recording'} by sap-vbs-to-playwright.`,
-    ' * The class and property names are mechanical (Screen1, vbakAuart): rename them to business terms.',
-    ' * The technical ids live here, once - when a screen changes, fix it here.',
+    ' * CONSTANTS and LOCATORS above hold every typed value and every id: change them there. The class and property names are mechanical (Screen1, vbakAuart): rename them to business terms.',
     ' */',
     `abstract class ${base}Screen extends SapPage {`,
     '  /** The command field: where a user types a transaction code. */',
-    `  readonly commandField = this.sap.locator(${quote(COMMAND_FIELD)});`,
+    `  readonly commandField = this.sap.locator(${objects.locator(COMMAND_FIELD)});`,
     '',
     '  /** The message line at the bottom of the screen. */',
-    `  readonly statusBar = this.sap.locator(${quote(STATUS_BAR)});`,
+    `  readonly statusBar = this.sap.locator(${objects.locator(STATUS_BAR)});`,
     '',
     '  /** A button in the standard toolbar (btn[0] Enter, btn[3] Back, btn[11] Save, btn[12] Cancel, ...). */',
     '  toolbarButton(n: number) {',
@@ -361,19 +343,19 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
           '',
           '/** The standard frame every screen has (command field, toolbar, status bar) - for steps that happen on a screen of their own. */',
           `export class ${base}Frame extends ${base}Screen {`,
-          `  readonly marker = ${quote(COMMAND_FIELD)};`,
+          `  readonly marker = ${objects.locator(COMMAND_FIELD)};`,
           '}',
         ]
       : []),
     ...pageClasses.flatMap((segment) => [
       '',
       `export class ${segment.className} extends ${base}Screen {`,
-      `  readonly marker = ${quote(segment.marker as string)};`,
+      `  readonly marker = ${objects.locator(segment.marker as string)};`,
       '',
       ...[...segment.controls.values()].map((c) =>
         c.kind === 'table'
-          ? `  readonly ${c.prop} = this.sap.table(${quote(c.id)});`
-          : `  readonly ${c.prop} = this.sap.locator(${quote(c.id)});`,
+          ? `  readonly ${c.prop} = this.sap.table(${objects.locator(c.id)});`
+          : `  readonly ${c.prop} = this.sap.locator(${objects.locator(c.id)});`,
       ),
       '}',
     ]),
@@ -383,7 +365,7 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
   // ---- 5. the spec
   const pagesFile = options.pagesFile ?? `${base}Pages`;
   const tag = options.tag ?? '@sapgui';
-  const usesEnv = envVars.size > 0;
+  const usesEnv = envVars.size > 0; // CONSTANTS (and so `env`) live in the pages file, not here
   const dataFile = options.dataFile ?? `${options.baseName}.data.csv`;
   const header = [
     '/**',
@@ -394,7 +376,7 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
           ` *  - reads ${[...envVars].join(', ')} from the environment (.env.<name> / CI variables); none of those values is stored here`,
         ]
       : []),
-    ` *  - the ids are in ./pages/${pagesFile}.ts; the page and property names are mechanical - rename them`,
+    ` *  - every typed value (CONSTANTS) and every id (LOCATORS) is at the top of ./pages/${pagesFile}.ts: change them there; the page and property names are mechanical - rename them`,
     ' *  - no waits are needed: every step waits for SAP to be idle and for its control to exist',
     ...(options.dataDriven
       ? [
@@ -410,14 +392,9 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
   const lines = [
     ...(options.dataDriven ? ["import * as path from 'node:path';"] : []),
     `import { sapGuiTest as test } from ${quote(options.testImport ?? '@automation/referenced-automation-sap')};`,
-    ...(usesEnv || options.dataDriven
-      ? [
-          `import { ${[...(options.dataDriven ? ['csvUtils'] : []), ...(usesEnv ? ['loadEnv'] : [])].join(', ')} } from '@automation/referenced-automation-utils';`,
-        ]
-      : []),
-    `import { ${[...(usesFrame ? [`${base}Frame`] : []), ...pageClasses.map((s) => s.className)].join(', ')} } from './pages/${pagesFile}';`,
+    ...(options.dataDriven ? ["import { csvUtils } from '@automation/referenced-automation-utils';"] : []),
+    `import { ${[...(objects.hasInputs ? ['CONSTANTS'] : []), ...(body.some((l) => l.includes('LOCATORS.')) ? ['LOCATORS'] : []), ...(usesFrame ? [`${base}Frame`] : []), ...pageClasses.map((s) => s.className)].join(', ')} } from './pages/${pagesFile}';`,
     '',
-    ...(usesEnv ? ['const env = loadEnv();', ''] : []),
     ...(options.dataDriven
       ? [
           `const rows = csvUtils.parseCsvFile(path.join(__dirname, ${quote(dataFile)}));`,

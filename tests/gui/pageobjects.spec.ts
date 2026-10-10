@@ -34,7 +34,7 @@ test.describe('page objects from a recording', () => {
   test('the recording is cut into screens where SAP changes screen', () => {
     expect(result.screens.map((s) => s.className)).toEqual(['DemoFlowScreen1Page', 'DemoFlowScreen2Page', 'DemoFlowScreen3Page']);
     expect(result.screens.map((s) => s.marker)).toEqual(['wnd[0]/usr/txtRSYST-MANDT', 'wnd[0]/usr/ctxtVBAK-AUART', 'wnd[0]/usr/ctxtKUAGV-KUNNR']);
-    expect(result.screens[0]?.controls).toEqual(['rsystMandt', 'rsystBname', 'rsystBcode', 'rsystLangu']);
+    expect(result.screens[0]?.controls).toEqual(['logonClient', 'logonUser', 'logonPassword', 'logonLanguage']);
   });
 
   test('every technical id lives in the pages file - the spec has none of its own for page controls', () => {
@@ -59,7 +59,8 @@ test.describe('page objects from a recording', () => {
   });
 
   test('a table control becomes a table helper; direct members go through .locator, cells through .cell', () => {
-    expect(result.pages.code).toMatch(/readonly sapmv45atctrlUErfAuftragTable = this\.sap\.table\('wnd\[0\]\/usr\/tblSAPMV45ATCTRL_U_ERF_AUFTRAG'\)/);
+    expect(result.pages.code).toMatch(/readonly sapmv45atctrlUErfAuftragTable = this\.sap\.table\(LOCATORS\.sapmv45atctrlUErfAuftrag\)/);
+    expect(result.pages.code).toContain("sapmv45atctrlUErfAuftrag: 'wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG',");
     expect(result.spec).toContain("Table.locator.set('columns.elementAt(1).width', 18)");
     expect(result.spec).toContain(".cell('ctxtRV45A-MABNR', 1, 0).fill(");
   });
@@ -73,7 +74,8 @@ test.describe('page objects from a recording', () => {
   test('the recorded password is in none of the generated files', () => {
     expect(result.spec).not.toContain('correct-horse');
     expect(result.pages.code).not.toContain('correct-horse');
-    expect(result.spec).toContain("env.get('SAP_PASSWORD')");
+    expect(result.pages.code).toContain("return env.get('SAP_PASSWORD');"); // CONSTANTS holds the getter; the spec only refers to it
+    expect(result.spec).toContain('CONSTANTS.inputs.logonPassword');
   });
 
   test('sleeps are dropped, and logic the converter cannot translate is carried as a TODO', () => {
@@ -85,8 +87,10 @@ test.describe('page objects from a recording', () => {
 
   test('a pop-up control is not put on a page (it is not part of the main screen)', () => {
     const popup = convertToPageObjects(`session.findById("wnd[0]/usr/txtA").text = "1"\nsession.findById("wnd[1]/usr/btnOK").press`, options);
-    expect(popup.pages.code).not.toContain('wnd[1]/usr/btnOK');
-    expect(popup.spec).toContain("sap.locator('wnd[1]/usr/btnOK').press()");
+    expect(popup.screens[0]?.controls).toEqual(['a']); // no page class has it
+    expect(popup.pages.code).toContain("ok: 'wnd[1]/usr/btnOK',"); // it is only a named id in LOCATORS
+    expect(popup.pages.code).not.toMatch(/readonly ok\b/);
+    expect(popup.spec).toContain('sap.locator(LOCATORS.ok).press()');
   });
 
   test('two fields with the same name on one screen get distinct properties', () => {
@@ -129,7 +133,7 @@ test.describe('data-driven mode', () => {
 
   test('without --data nothing is parameterised', () => {
     expect(convertToPageObjects(recording, options).data).toBeUndefined();
-    expect(convertToPageObjects(recording, options).spec).toContain("'OR'");
+    expect(convertToPageObjects(recording, options).pages.code).toContain("vbakAuart: 'OR',"); // typed values are in CONSTANTS, not in the CSV
   });
 });
 
@@ -173,5 +177,33 @@ test.describe('CLI', () => {
     const file = path.join(tmp(), 'custom.spec.ts');
     spawnSync('node', [cli, path.join(root, 'examples/va01_create_order.vbs'), '--out', file]);
     expect(fs.existsSync(file)).toBe(true);
+  });
+});
+
+test.describe('CONSTANTS and LOCATORS at the top of the pages file', () => {
+  const result = convertToPageObjects(recording, options);
+  const code = result.pages.code;
+
+  test('both objects (exported) come first, then the page classes built from them', () => {
+    expect(code.indexOf('export const CONSTANTS = {')).toBeGreaterThan(0);
+    expect(code.indexOf('export const LOCATORS = {')).toBeGreaterThan(code.indexOf('export const CONSTANTS'));
+    expect(code.indexOf('abstract class DemoFlowScreen')).toBeGreaterThan(code.indexOf('export const LOCATORS'));
+    expect(code).toContain("const env = loadEnv();");
+    expect(code).toContain("vbakAuart: 'wnd[0]/usr/ctxtVBAK-AUART',");
+    expect(code).toContain("readonly vbakAuart = this.sap.locator(LOCATORS.vbakAuart);");
+  });
+
+  test('the spec imports what it uses from the pages file and has no env and no ids of its own', () => {
+    expect(result.spec).toMatch(/import \{ CONSTANTS, [^}]*DemoFlowScreen1Page[^}]*\} from '\.\/pages\/DemoFlowPages';/);
+    expect(result.spec).not.toMatch(/loadEnv|env\.get/);
+    expect(result.spec).toContain('.fill(CONSTANTS.inputs.vbakAuart)');
+    expect(result.spec).toContain('.fill(CONSTANTS.inputs.logonUser)');
+  });
+
+  test('--data keeps typed values in the CSV; CONSTANTS then holds only what comes from the environment', () => {
+    const data = convertToPageObjects(recording, { ...options, dataDriven: true });
+    expect(data.pages.code).toContain('get logonPassword()');
+    expect(data.pages.code).not.toContain("vbakAuart: 'OR'");
+    expect(data.spec).toContain("field(data, 'vbakAuart')");
   });
 });

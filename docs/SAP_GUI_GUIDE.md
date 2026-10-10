@@ -258,6 +258,26 @@ Review the generated header. It lists everything that needs a human.
 | `If` / `For` / `Do` / `Select Case` / `MsgBox` | **not guessed**: left as `// TODO(manual, vbs:N)` with the original line, everything inside the block held back. `--strict` exits non-zero so CI cannot miss it |
 | a variable inside a chained path (`getAbsoluteRow(i)`) | TODO |
 
+**Change a value or an id in one place.** A converted test starts with two objects and its steps only refer to them:
+
+```ts
+const CONSTANTS = {                        // what the recording typed; secrets and settings are environment getters
+  inputs: {
+    get logonPassword() { return env.get('SAP_PASSWORD'); },
+    get logonUser() { return env.get('SAP_USER', 'TESTUSER'); },
+    vbakAuart: 'OR',  vbakVkorg: '1000',  transaction: 'VA01',
+  },
+};
+const LOCATORS = {                         // every control id, named once
+  logonUser: 'wnd[0]/usr/txtRSYST-BNAME',
+  vbakAuart: 'wnd[0]/usr/ctxtVBAK-AUART',
+  toolbarButton11: 'wnd[0]/tbar[0]/btn[11]',
+};
+await sap.setText(LOCATORS.vbakAuart, CONSTANTS.inputs.vbakAuart);
+```
+
+Another order type: change `inputs.vbakAuart`. A screen was customised and the id moved: fix `LOCATORS.vbakAuart` once. The same value typed into the same control is one entry; a different value is another (`vbakAuart2`). With `--page-objects` both objects are exported from the top of `pages/<Name>Pages.ts` and the page classes are built from them; `--inline` writes ids and values in the steps instead.
+
 **More than a flat script:**
 - `npm run convert:pages` (`--page-objects`) cuts the recording into **screens** at every server round trip: one page class per screen with named properties, a shared base for the command field, toolbar and status bar, table-control helpers, and a test that waits for each page. Names are mechanical (`Screen1`, `vbakAuart`) - rename them to business terms.
 - `npm run convert:data` (`--data`, implies page objects) turns every literal typed in the recording into a column of `<name>.data.csv` and runs **one test per row**; the first row holds what was recorded. User, client, password and language still come from the environment, never the CSV; a missing column fails with its name.
