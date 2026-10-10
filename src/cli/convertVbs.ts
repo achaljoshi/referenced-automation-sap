@@ -29,7 +29,13 @@ Options:
   --data                  Make every literal typed in the recording a column of <name>.data.csv and run one test per row
                           (implies --page-objects). The first row holds the values that were recorded.
   --sap-import <module>   Module the page objects import SapPage from. Default: @automation/referenced-automation-sap.
-  --strict                Exit with an error if anything could not be converted automatically.
+  --expect-status <regex> The test's assertion: at the end the status bar must match this (case-insensitive), e.g. "has been saved".
+                          Without it a converted test has NO assertion (a recording only performs actions): it ends with a
+                          TODO and a guard that FAILS the test until you add one.
+  --expect-import <mod>   Module the spec imports the SAP assertions (sapExpect) from with --expect-status. Default: @automation/referenced-automation-sap.
+  --allow-no-assertion    Leave the failing guard out (the TODO comment and the header note stay). For examples and spikes.
+  --strict                Exit with an error if anything could not be converted automatically (control flow, unsupported lines).
+                          Notes about what the converter did on purpose - a secret replaced by an environment read - do not count.
   -h, --help
 `;
 
@@ -47,6 +53,9 @@ function parseArgs(argv: string[]) {
     inline: false,
     data: false,
     sapImport: undefined as string | undefined,
+    expectStatus: undefined as string | undefined,
+    expectImport: undefined as string | undefined,
+    allowNoAssertion: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
@@ -64,6 +73,9 @@ function parseArgs(argv: string[]) {
     else if (arg === '--keep-session-prefix') opts.keepPrefix = true;
     else if (arg === '--no-line-comments') opts.lineComments = false;
     else if (arg === '--strict') opts.strict = true;
+    else if (arg === '--expect-status') opts.expectStatus = value();
+    else if (arg === '--expect-import') opts.expectImport = value();
+    else if (arg === '--allow-no-assertion') opts.allowNoAssertion = true;
     else if (arg === '--inline') opts.inline = true;
     else if (arg === '--page-objects') opts.pageObjects = true;
     else if (arg === '--data') {
@@ -118,9 +130,12 @@ function main(): void {
       params: opts.params,
       lineComments: opts.lineComments,
       inline: opts.inline,
+      expectStatus: opts.expectStatus,
+      noAssertion: opts.allowNoAssertion ? ('todo' as const) : ('fail' as const),
+      expectImport: opts.expectImport,
     };
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    let result: { warnings: Array<{ line: number; message: string }>; envVars: string[] };
+    let result: { warnings: Array<{ line: number; message: string; severity?: 'todo' | 'info' }>; envVars: string[] };
     if (opts.pageObjects) {
       const generated = convertToPageObjects(fs.readFileSync(file, 'utf8'), {
         ...common,
@@ -154,7 +169,11 @@ function main(): void {
       process.stdout.write(`    reads from the environment: ${result.envVars.join(', ')}\n`);
     for (const warning of result.warnings)
       process.stdout.write(`    line ${warning.line}: ${warning.message}\n`);
-    totalWarnings += result.warnings.length;
+    totalWarnings += result.warnings.filter((w) => w.severity !== 'info').length;
+    if (opts.expectStatus === undefined)
+      process.stdout.write(
+        `    no assertion: ${opts.allowNoAssertion ? 'add one (TODO in the file)' : 'the test fails until you add one (use --expect-status to generate it)'}\n`,
+      );
   }
   if (opts.strict && totalWarnings > 0) {
     process.stderr.write(`\n${totalWarnings} item(s) need attention (--strict).\n`);

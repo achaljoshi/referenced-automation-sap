@@ -1,4 +1,5 @@
-import { DEFAULT_PARAM_RULES, renderExpr, type GenerateOptions, type ParamRule } from './generator';
+import { assertionLines, DEFAULT_PARAM_RULES, NO_ASSERTION_TODO, renderExpr, ruleFor, VALUE_PROPS, type GenerateOptions, type ParamRule } from './generator';
+import { protectSecrets } from './secrets';
 import { COMMAND_FIELD, identifier, propertyName, quote, SESSION_PREFIX, STATUS_BAR, TABLE_CELL, TOOLBAR_BUTTON } from './names';
 import { Objects } from './objects';
 
@@ -74,12 +75,20 @@ const relative = (id: string, strip: boolean) => (strip ? id.replace(SESSION_PRE
  * tidy up - the point is that the ids now live in ONE place and the test reads as a sequence of screens.
  */
 export function convertToPageObjects(source: string, options: PageObjectOptions): PageObjectResult {
-  const { steps, warnings: parseWarnings } = parseVbs(source);
-  const warnings = [...parseWarnings];
+  const parsed = parseVbs(source);
+  const warnings = [...parsed.warnings];
   const strip = options.stripSessionPrefix ?? true;
   const rules: ParamRule[] = [...(options.params ?? []), ...DEFAULT_PARAM_RULES];
   const base = pascal(options.baseName) || 'Recording';
   const envVars = new Set<string>();
+  // Secrets first: a variable that carries a password (by name or because it flows into a password field) loses its literals.
+  const protectedSteps = protectSecrets(parsed.steps, (id) => {
+    const rule = ruleFor(id, rules);
+    return rule?.secret ? rule.envVar : undefined;
+  });
+  const steps = protectedSteps.steps;
+  warnings.push(...protectedSteps.warnings.map((w) => ({ ...w, severity: 'info' as const })));
+  for (const name of protectedSteps.envVars) envVars.add(name);
   // The pages file starts with CONSTANTS (typed values, secrets as environment getters) and LOCATORS (every id, named once).
   const objects = new Objects();
   objects.locator(COMMAND_FIELD); // the base class reads these two
@@ -185,17 +194,20 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
   };
 
   const valueFor = (id: string, value: Expr, line: number): string => {
+    const rule = ruleFor(id, rules);
+    // a secret field: whatever literal (string, number, concatenation) the recording put there is replaced
+    if (rule?.secret && value.kind !== 'variable') {
+      envVars.add(rule.envVar);
+      warnings.push({
+        line,
+        severity: 'info',
+        message: `the recorded value for "${id}" was replaced with env ${rule.envVar} - it is not in the generated files`,
+      });
+      return objects.fromEnv(id, `env.get(${quote(rule.envVar)})`);
+    }
     if (value.kind === 'string') {
-      const rule = rules.find((r) => r.idPattern.test(id));
       if (rule) {
         envVars.add(rule.envVar);
-        if (rule.secret) {
-          warnings.push({
-            line,
-            message: `the recorded value for "${id}" was replaced with env ${rule.envVar} - it is not in the generated files`,
-          });
-          return objects.fromEnv(id, `env.get(${quote(rule.envVar)})`);
-        }
         return objects.fromEnv(id, `env.get(${quote(rule.envVar)}, ${quote(value.value)})`);
       }
       if (options.dataDriven) {
@@ -205,7 +217,14 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
       }
       if (value.value !== '') return objects.input(id, value.value);
     }
-    return renderExpr(value);
+    return renderValue(value, id);
+  };
+
+  /** An expression as code; a secret read from the environment becomes a CONSTANTS getter. */
+  const renderValue = (value: Expr, name: string): string => {
+    if (value.kind !== 'env') return renderExpr(value);
+    envVars.add(value.envVar);
+    return objects.fromEnv(name, renderExpr(value));
   };
 
   for (const segment of segments) {
@@ -239,7 +258,7 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
         case 'let': {
           const name = identifier(step.name);
           body.push(
-            `${declared.has(name) ? '' : 'let '}${name} = ${renderExpr(step.value)};${trace(step.line)}`,
+            `${declared.has(name) ? '' : 'let '}${name} = ${renderValue(step.value, step.name)};${trace(step.line)}`,
           );
           declared.add(name);
           break;
@@ -260,6 +279,10 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
           if (prop === 'text')
             body.push(
               `await ${target}.fill(${valueFor(id, step.value, step.line)});${trace(step.line)}`,
+            );
+          else if (VALUE_PROPS.has(prop) && ruleFor(id, rules)?.secret)
+            body.push(
+              `await ${target}.set(${quote(step.prop)}, ${valueFor(id, step.value, step.line)});${trace(step.line)}`,
             );
           else if (prop === 'selected' && step.value.kind === 'boolean')
             body.push(`await ${target}.setChecked(${renderExpr(step.value)});${trace(step.line)}`);
@@ -383,15 +406,19 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
           ` *  - one test runs per row of ${dataFile}; the first row holds the values that were recorded`,
         ]
       : []),
+    ...(options.expectStatus === undefined
+      ? [` *  - NO ASSERTION: ${NO_ASSERTION_TODO.replace('TODO(converter): no assertion - ', '')} ${options.noAssertion === 'todo' ? 'Add one.' : 'It ends with a guard that fails until you add one.'}`]
+      : []),
     ...warnings.map((w) => ` *  - line ${w.line}: ${w.message}`),
     ' */',
   ];
   const indent = options.dataDriven ? '    ' : '  ';
-  const testBody = body.map((line) => `${indent}${line}`);
+  const testBody = [...body, ...assertionLines(options)].map((line) => `${indent}${line}`);
   const title = `${options.testName} ${tag}`.trim();
   const lines = [
     ...(options.dataDriven ? ["import * as path from 'node:path';"] : []),
     `import { sapGuiTest as test } from ${quote(options.testImport ?? '@automation/referenced-automation-sap')};`,
+    ...(options.expectStatus !== undefined ? [`import { sapExpect as expect } from ${quote(options.expectImport ?? '@automation/referenced-automation-sap')};`] : []),
     ...(options.dataDriven ? ["import { csvUtils } from '@automation/referenced-automation-utils';"] : []),
     `import { ${[...(objects.hasInputs ? ['CONSTANTS'] : []), ...(body.some((l) => l.includes('LOCATORS.')) ? ['LOCATORS'] : []), ...(usesFrame ? [`${base}Frame`] : []), ...pageClasses.map((s) => s.className)].join(', ')} } from './pages/${pagesFile}';`,
     '',

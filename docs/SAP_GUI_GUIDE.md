@@ -59,16 +59,21 @@ Settings come from `.env.<name>` (committed, **no secrets**), overridden by `.en
 | `SAP_GUI_CONNECTION_INDEX` / `SAP_GUI_SESSION_INDEX` | which open connection/session, for `attach` | `0` / `0` |
 | `SAP_GUI_CONNECTION_STRING` | open a system by connection string instead of a SAP Logon entry (`open` mode) | |
 | `SAP_GUI_TIMEOUT_MS` | longest any single step waits | `30000` |
+| `SAP_GUI_ROUNDTRIP_WAIT_MS` | after an action that should reach the server, how long to wait for the server's answer (round-trip counter / screen change) before asking whether SAP is idle; also the quiet period for actions that never reach it. `0` = the old "idle twice" check. Raise it on a slow link | `250` |
 | `SAP_GUI_TRANSPORT` | `powershell` (default) or `java` (the Java/JACOB helper in `bridge/jacob`, with `SAP_GUI_BRIDGE_JAR`, `SAP_GUI_JACOB_JAR`, `SAP_GUI_JACOB_DLL`, `SAP_GUI_JAVA`) | `powershell` |
 | `SAP_USER_POOL` | comma list of users leased one per worker (open mode); `SAP_PASSWORD_<USER>` per user; `SAP_GUI_POOL_TIMEOUT_MS`, `SAP_GUI_POOL_DIR` | |
 | `SAP_GUI_FALLBACKS` | `report` / `fail` / `off` - what to do when a locator fallback is used | `report` |
 | `SAP_GUI_CLEANUP` | `off` keeps the data tests created | on |
+| `SAP_GUI_CLEANUP_FAILURE` / `SAP_GUI_CLEANUP_TIMEOUT_MS` | `warn` = a failed cleanup is only recorded (default `fail`: the test fails and names what is left in SAP); longest one cleanup may run before it is asked to stop | `fail` / `60000` |
+| `SAP_GUI_HOME_FAILURE` | `warn` = run the test even if the session could not be returned to the start screen (default `fail`) | `fail` |
 | `SAP_GUI_INSIGHTS` / `SAP_GUI_INSIGHTS_DIR` | `off` disables recording of transactions and timings | on |
 | `SAP_GUI_REUSE` | `worker` = one session per worker, reset between tests; `test` = a fresh connection per test | `worker` |
 | `SAP_GUI_EVIDENCE` | `off` / `failure` (screenshot + journal on failure) / `steps` (also after every screen change) | `failure` |
+| `SAP_GUI_EVIDENCE_DIR` | where screenshots are written before they are attached (and then deleted) | `test-results/sap-evidence` |
 | `SAP_MULTIPLE_LOGON` | `continue` or `fail` when SAP says the user is already logged on | `continue` |
 | `SAP_GUI_LOGON_PATH` | `saplogon.exe`, started in `open` mode if SAP Logon isn't running | `C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe` |
 | `SAP_GUI_POWERSHELL` | path to `powershell.exe`; a 32-bit SAP GUI needs `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe` | `powershell.exe` |
+| `SAP_GUI_POWERSHELL_SCRIPT_DIR` | folder with an approved (typically signed) `sap-gui-bridge.ps1` (`npx sap-gui-doctor --print-bridge \| Out-File -Encoding ascii sap-gui-bridge.ps1`, then sign it): it is run as it is and `-ExecutionPolicy Bypass` is NOT passed. A copy that differs from this version's script is refused. Without it the bridge runs from a temp file with `-ExecutionPolicy Bypass` for that one process | |
 | `SAP_GUI_SIMULATOR` | `true` = use the built-in fake SAP (any OS) | `false` |
 | `SAP_SAMPLE_TCODE` | transaction used by sample test 02 | `SU3` |
 | `SAP_RUN_TEMPLATES` | `true` = run the `...TEMPLATE` tests against real SAP | `false` |
@@ -129,7 +134,7 @@ Locators are **strict**: if more than one control matches, the action fails and 
 | `text()` `value()` `tooltip()` `options()` `isChecked()` `isEditable()` `exists()` `count()` | any | read |
 | `press()` `focus()` `sendKey(n)` `get(p)` `set(p, v)` `call(m, ...)` | any | the raw members, when you need them |
 
-`fill()` refuses a read-only field with a message instead of typing into nothing. `fill(value, { checkMaxLength: true })` refuses text longer than the field allows.
+`fill()` refuses a read-only field with a message instead of typing into nothing. `fill(value, { checkMaxLength: true })` refuses text longer than the field allows **and reads the field back afterwards**: if SAP kept nothing or cut the value short (it does so without any error) the call fails naming what the field holds. SAP reformatting a value (upper case, leading zeros) is accepted, and a password field is never read back.
 
 ### Checking - assertions that wait
 
@@ -137,10 +142,12 @@ Locators are **strict**: if more than one control matches, the action fails and 
 await expect(sap.getByLabel('Order Number')).toHaveText('4711');     // toContainText, toExist, toBeEditable, toBeChecked
 await expect(sap).toHaveStatusMessage(/saved/i, { type: 'S' });      // S success  E error  W warning  I info  A abort
 await expect(sap).toHaveTitle(/Create Standard Order/);
-await expect(sap).not.toHaveStatusMessage(/./, { type: 'E' });       // no error message
+await expect(sap).toHaveNoStatusError();                              // no error (E) or abort (A) - after SAP has answered
 ```
 
 They re-check until they hold or the timeout (default 5 s, `{ timeout }` to change) - SAP changes after a server round trip, so a one-shot read right after an action is a race. Everything from Playwright's `expect` works too (`expect.soft`, `.not`, ...).
+
+`.not.toHaveStatusMessage(/./, { type: 'E' })` passes the moment the status bar is not an error - including on the old screen before SAP has answered. `toHaveNoStatusError()` (the BDD step *the status bar does not show an error*) first waits, bounded, for evidence that SAP has answered the last action - a status message of type S, I or W, or the screen / title / round-trip counter having moved - then checks for E **and** A, and fails if nothing at all is observed (an empty status bar on an unchanged screen proves nothing). `{ requireOutcome: false }` / the step *... does not show an error right now* checks the status bar as it is.
 
 ### Pop-ups you do not want in every test
 
@@ -204,14 +211,14 @@ await expect(sap).toMatchScreenContract('va01-overview');   // compares with con
 npx sap-gui-contracts capture va01-overview   # on the right screen, once; review and COMMIT the file
 npx sap-gui-contracts diff old.json new.json  # no SAP needed
 ```
-A contract records the ids, types and fixed captions of a screen - never field values; table-cell positions are ignored. A control that disappeared or changed type fails, with where it probably moved; additions and caption changes pass unless `strict`. Update a baseline on purpose with `SAP_GUI_UPDATE_CONTRACTS=true`.
+A contract records the ids, types and fixed captions of a screen - never field values; table-cell positions are ignored. A control that disappeared or changed type fails, with where it probably moved; additions and caption changes pass unless `strict`. Update a baseline on purpose with `SAP_GUI_UPDATE_CONTRACTS=true` - on a workstation: when `CI` is set the update is **refused** (it would accept whatever screen SAP shows as the new baseline).
 
 ### Create data, and always clean it up
 ```ts
 const orderNo = await sapData.captureFromStatusBar('SalesOrder', /Order (\d+) has been saved/, { cleanup: (s) => cancelOrder(s, orderNo) });
-const customer = sapData.unique('CUST');   // never collides with what an earlier attempt left
+const customer = sapData.unique('CUST');   // time + counter + worker index + random: never collides with an earlier attempt or another worker
 ```
-Cleanups run after the test - pass or fail, after every retry, newest first, continuing past a failure. `npx sap-gui-data orphans` lists whatever could not be cleaned (exit 1). `SAP_GUI_CLEANUP=off` keeps everything for inspection.
+Cleanups run after the test - pass or fail, after every retry, newest first, one at a time on the session: a cleanup that runs out of time gets an abort signal (`(sap, { signal }) => ...`) and is awaited for a short grace period before the next one starts; if it never stops, the remaining cleanups are not attempted and are reported as failed. **A cleanup that fails, or an object recorded without one, fails the test** (and is a test annotation `sap-cleanup-failed`) - set `SAP_GUI_CLEANUP_FAILURE=warn` to only record it. `npx sap-gui-data orphans` lists whatever could not be cleaned (exit 1); `sap-gui-data list --fail-on-orphans` does the same for the full list, `--require-data` exits 2 when no data directory exists (the SAP tests did not run), and a damaged list is exit 2 - so the command can gate a pipeline. `SAP_GUI_CLEANUP=off` keeps everything for inspection (those objects show as orphans).
 
 ### Run workers in parallel without "already logged on"
 `SAP_USER_POOL=U1,U2,U3` (with `SAP_GUI_MODE=open`): each worker leases a distinct user (exclusive across processes on one machine, with a heartbeat and recovery from crashed runs) and `logon()` uses its own `SAP_PASSWORD_<USER>` or the shared `SAP_PASSWORD`. A file lock cannot coordinate several CI machines using the same users; give each machine its own users.
@@ -313,7 +320,7 @@ On any failure the report attaches the status bar text and a screenshot of the S
 
 - **The framework's own tests** (`npm run test:framework`) need no SAP and run on the normal Linux job - they use the simulator.
 - **Real SAP tests** need a Windows runner with SAP GUI and a logon session. `.gitlab-ci.yml` has a manual `sapgui` job as a template; read its comment first (placeholder runner tag, shell, tarballs in `../shared-packages`, masked `SAP_PASSWORD`). Use `SAP_GUI_MODE=open` there.
-- Run `npm run convert -- --strict`-style conversions in a pipeline if you want unconverted logic to fail the build rather than slip through.
+- Run `npm run convert` (it passes `--strict`) in a pipeline if you want unconverted logic to fail the build rather than slip through.
 
 ## 9. What has and has not been verified
 

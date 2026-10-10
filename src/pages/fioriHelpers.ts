@@ -16,7 +16,7 @@ import type { Locator, Page } from '@playwright/test';
  * 2. `waitForUI5Ready` - UI5 shows a full-screen or local busy indicator
  *    while it's fetching data/re-rendering; interacting before it clears is
  *    a common source of flaky UI5 test automation. This waits for every
- *    busy-indicator element to disappear.
+ *    busy-indicator element to disappear - and FAILS, saying so, if one never does.
  *
  * Where a control has a proper ARIA role/label (most standard sap.m
  * controls do), prefer Playwright's own page.getByRole()/getByLabel() -
@@ -24,8 +24,13 @@ import type { Locator, Page } from '@playwright/test';
  * the custom/compound controls that don't expose one.
  */
 export function byControlId(page: Page, logicalId: string): Locator {
-  return page.locator(`[id$="${logicalId}"]`);
+  // The id sits inside a quoted attribute value: escape what would end the string or start an escape.
+  const quoted = logicalId.replace(/[\\"]/g, '\\$&');
+  return page.locator(`[id$="--${quoted}"], [id="${quoted}"]`);
 }
+
+/** The elements UI5 shows while it is busy (local indicators, the busy dialog's block layer). */
+const BUSY_INDICATORS = '.sapUiLocalBusyIndicator, .sapMBusyIndicator, .sapUiBlockLayer';
 
 /**
  * Waits until the UI5 app has finished what it is doing, without a fixed
@@ -42,11 +47,27 @@ export function byControlId(page: Page, logicalId: string): Locator {
  * moments - after opening the app, or after a step that re-renders widely.
  */
 export async function waitForUI5Ready(page: Page, timeoutMs = 30_000): Promise<void> {
-  await page
-    .locator('.sapUiLocalBusyIndicator, .sapMBusyIndicator, .sapUiBlockLayer')
-    .first()
-    .waitFor({ state: 'hidden', timeout: timeoutMs })
-    .catch(() => undefined); // fine if none ever appeared
+  const deadline = Date.now() + timeoutMs;
+  // Every indicator must be gone (none at all is fine). One that never clears is a failure of the app or the test, not "ready".
+  try {
+    await page.waitForFunction(
+      (selector) => {
+        // runs in the browser; this project compiles without the DOM typings
+        const dom = globalThis as unknown as {
+          document: { querySelectorAll(s: string): ArrayLike<{ getBoundingClientRect(): { width: number; height: number } }> };
+          getComputedStyle(el: unknown): { visibility: string };
+        };
+        return !Array.from(dom.document.querySelectorAll(selector)).some((el) => {
+          const box = el.getBoundingClientRect();
+          return box.width > 0 && box.height > 0 && dom.getComputedStyle(el).visibility !== 'hidden';
+        });
+      },
+      BUSY_INDICATORS,
+      { timeout: timeoutMs },
+    );
+  } catch (error) {
+    throw new Error(`waitForUI5Ready: a UI5 busy indicator (${BUSY_INDICATORS}) was still showing after ${timeoutMs}ms`, { cause: error });
+  }
 
   await page.waitForFunction(
     () => {
@@ -54,6 +75,6 @@ export async function waitForUI5Ready(page: Page, timeoutMs = 30_000): Promise<v
       return !core?.getUIDirty?.();
     },
     undefined,
-    { timeout: timeoutMs },
+    { timeout: Math.max(deadline - Date.now(), 1) },
   );
 }

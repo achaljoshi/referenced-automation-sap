@@ -97,6 +97,8 @@ build:
     - npm ci
     - npm run build
     - npm run lint
+    # type-checks tests, features' steps and scripts too (the build only compiles src/)
+    - npm run typecheck
   artifacts:
     paths:
       - dist/
@@ -108,6 +110,10 @@ test:
   script:
     - npm ci
     - npx playwright install chromium
+    # Both scripts run `bddgen` first (the Gherkin features only exist as tests after it) and end with
+    # scripts/min-executed.js: the job FAILS when fewer tests executed than expected, and prints how many tests were
+    # skipped and why - e.g. "skipped 8x: needs a JDK" (tests/gui/javaBridge.spec.ts skips without javac/java: the
+    # Java/JACOB bridge helper is then NOT exercised, and this is where the log says so). Put a JDK in the image to run it.
     - npm run test:smoke
     # The SAP GUI framework (VBScript converter, session waiting) against the
     # in-memory simulator - needs no SAP and no Windows, so it runs here.
@@ -177,6 +183,40 @@ sapgui:
       - logs/
     expire_in: 30 days
 
+# ---- Real-SAP conformance (manual or scheduled, Windows runner only) ----
+#
+# `npm run conformance` (= `sap-gui-doctor --conformance`) runs the transport conformance suite against a REAL SAP GUI:
+# the checks every transport must pass, including the NOT_FOUND vs ERROR codes the retry logic depends on. It is the only
+# thing that can show the PowerShell bridge (or the Java/JACOB helper) behaves on a real SAP GUI as the simulator
+# assumes - every other job in this file runs the framework against its own simulator.
+#
+# NOT VERIFIED: nobody has run this job. It is a template: the runner tag is a placeholder, it assumes a logged-on SAP Logon
+# session on that runner (SAP_GUI_MODE=attach, one worker). `--conformance` alone changes nothing in SAP (the `--write`
+# variant, which this job does not use, types into the command field). allow_failure is true until it has produced a
+# trusted result; then make it a scheduled nightly (Settings > CI/CD > Schedules) and set allow_failure to false.
+sapgui-conformance:
+  stage: test
+  needs: ["build"]
+  allow_failure: true
+  tags:
+    - sap-gui-windows   # PLACEHOLDER - rename to your Windows runner's tag
+  before_script: []
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: always
+    - when: manual
+  script:
+    - if ($env:NPM_REGISTRY_URL) { npm config set registry $env:NPM_REGISTRY_URL }
+    - npm ci
+    - npm run build
+    - npm run doctor
+    - npm run conformance
+  artifacts:
+    when: always
+    paths:
+      - logs/
+    expire_in: 30 days
+
 # ---- Security gates: dependency audit + secret scan ----
 #
 # automation-audit-gate fails on high/critical advisories unless audit-allowlist.json accepts them - each exception
@@ -191,14 +231,43 @@ security:
   script:
     - npm ci
     - npx automation-scan-secrets
-    - npx automation-audit-gate
+    - npx automation-audit-gate --allow-unassigned
+
+# The Allure HTML report: `allure generate` is a Java program, so it needs a JRE on the runner image (the Playwright
+# image has none by default). Without one, or with no raw results to turn into a report, this job says so and ends
+# without a `public` folder - nothing is published, and the raw allure-results stay in the test jobs' artifacts.
+# ---- Fortnightly framework audit (start it by hand: "Run pipeline" is not needed, use this job's play button) ----
+#
+# The automated part of the audit (docs/governance/AUDIT.md in referenced-automation-utils): waits, skips, assertions,
+# traceability, dependencies, governance files, pipeline and documentation consistency. The report is the job's artifact.
+# Set AUDIT_RUN_GATES=1 on the pipeline to also run lint, typecheck, test and security inside this job (slow).
+audit:
+  stage: report
+  needs: ["build"]
+  when: manual
+  allow_failure: true
+  script:
+    - npm ci
+    - npx automation-framework-audit --out audit-reports ${AUDIT_RUN_GATES:+--run}
+  artifacts:
+    when: always
+    paths:
+      - audit-reports/
+    expire_in: 90 days
 
 pages:
   stage: report
   needs: ["test", "regression"]
   script:
-    - npm install -g allure-commandline --silent
-    - allure generate allure-results --clean -o public
+    - |
+      if [ -z "$(ls -A allure-results 2>/dev/null)" ]; then
+        echo "no allure-results from the test jobs - nothing to publish"; exit 0
+      fi
+      if ! command -v java >/dev/null 2>&1; then
+        echo "Java not found: allure-commandline needs a JRE. Add one to the image to publish the report; skipping."; exit 0
+      fi
+      npm install -g allure-commandline --silent
+      allure generate allure-results --clean -o public
   artifacts:
     paths:
       - public

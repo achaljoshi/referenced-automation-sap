@@ -21,19 +21,33 @@ export interface CreatedObject {
   user?: string;
 }
 
+/** What a cleanup function gets besides the session. */
+export interface CleanupContext {
+  /** Aborted when the cleanup runs out of time: stop clicking in SAP and return - the next cleanup waits for you to finish. */
+  signal: AbortSignal;
+}
+
 export interface RecordOptions {
-  /** Undo what the test created (cancel/delete the object). Receives the live session, already back on the start screen. */
-  cleanup?: (sap: SapGuiSession) => Promise<void>;
+  /** Undo what the test created (cancel/delete the object). Receives the live session, already back on the start screen, and a signal that is aborted if the cleanup times out. */
+  cleanup?: (sap: SapGuiSession, context: CleanupContext) => Promise<void>;
   /** The object is meant to stay (reference data, a shared fixture): it is listed, but never cleaned and not reported as an orphan. */
   keep?: boolean;
 }
 
 interface Entry extends CreatedObject {
-  cleanup?: (sap: SapGuiSession) => Promise<void>;
+  cleanup?: RecordOptions['cleanup'];
+}
+
+export interface SapDataRegistryOptions {
+  /** Longest one cleanup may run before it is asked to stop (abort signal). Default 60 s (SAP_GUI_CLEANUP_TIMEOUT_MS). */
+  cleanupTimeoutMs?: number;
+  /** After the signal, how long a cleanup that timed out gets to actually finish before the remaining cleanups are given up on. Default 10 s. */
+  cleanupGraceMs?: number;
 }
 
 export const DEFAULT_DATA_DIR = 'test-results/sap-data';
 const CLEANUP_TIMEOUT_MS = 60_000;
+const CLEANUP_GRACE_MS = 10_000;
 
 let uniqueCounter = 0;
 
@@ -54,6 +68,7 @@ export class SapDataRegistry {
   constructor(
     private readonly sap: SapGuiSession,
     private readonly testName: string,
+    private readonly options: SapDataRegistryOptions = {},
   ) {}
 
   /** Registers an object you already know the id of. */
@@ -93,15 +108,18 @@ export class SapDataRegistry {
   }
 
   /**
-   * A value that will not collide with what an earlier attempt or run left behind:
-   * unique('CUST') -> 'CUSTK3F9Q2'. Keep `maxLength` to the field's length.
+   * A value that will not collide with what an earlier attempt, an earlier run or a parallel worker left behind:
+   * unique('CUST') -> 'CUSTK3F9Q2...'. The suffix carries the time, a counter, this worker's index and a random part;
+   * when `maxLength` is tight the leading (slowest-changing) characters are dropped first. Keep `maxLength` to the field's length.
    */
   unique(prefix: string, maxLength = 12): string {
-    const stamp = (Date.now() % 36 ** 5).toString(36).toUpperCase().padStart(5, '0');
-    const suffix = `${stamp}${(uniqueCounter++ % 36 ** 2).toString(36).toUpperCase().padStart(2, '0')}`;
+    const base36 = (n: number, width: number) => (n % 36 ** width).toString(36).toUpperCase().padStart(width, '0');
+    const worker = Number(process.env.TEST_WORKER_INDEX ?? process.env.TEST_PARALLEL_INDEX ?? 0) || 0;
+    const random = base36(Math.floor(Math.random() * 36 ** 3), 3);
+    const suffix = `${base36(Date.now(), 5)}${base36(uniqueCounter++, 2)}${base36(worker, 1)}${random}`;
     const room = maxLength - prefix.length;
     if (room < 4) throw new Error(`unique("${prefix}") leaves only ${Math.max(room, 0)} character(s) for the unique part within maxLength ${maxLength} - too few to avoid collisions`);
-    return prefix + suffix.slice(-room); // when space is tight keep the fastest-changing characters
+    return prefix + suffix.slice(-room);
   }
 
   get items(): readonly CreatedObject[] {
@@ -110,9 +128,16 @@ export class SapDataRegistry {
 
   /**
    * Undoes everything, newest first, continuing past failures (one stuck object must not leave the
-   * rest behind). Each cleanup has a time limit. Returns the final list.
+   * rest behind). Cleanups run strictly one at a time on the session: one that runs out of time is
+   * signalled to stop (`context.signal`) and AWAITED for a short grace period before the next one starts -
+   * two cleanups clicking in the same SAP window at once would corrupt each other. If it does not finish
+   * even then, the remaining cleanups are not attempted (they are marked failed, to be done by hand).
+   * Returns the final list.
    */
   async cleanup(): Promise<CreatedObject[]> {
+    const timeoutMs = this.options.cleanupTimeoutMs ?? CLEANUP_TIMEOUT_MS;
+    const graceMs = this.options.cleanupGraceMs ?? CLEANUP_GRACE_MS;
+    let stuck: string | undefined;
     for (const entry of [...this.entries].reverse()) {
       if (entry.status !== 'created') continue;
       if (!entry.cleanup) {
@@ -120,26 +145,62 @@ export class SapDataRegistry {
         entry.note = 'no cleanup was registered - remove it by hand';
         continue;
       }
+      if (stuck) {
+        entry.status = 'cleanup-failed';
+        entry.note = `not attempted: the cleanup of ${stuck} is still running in SAP - remove it by hand`;
+        log.warn(`[sap-gui] skipped the cleanup of ${entry.type} ${entry.id}: ${entry.note}`);
+        continue;
+      }
+      const what = `cleanup of ${entry.type} ${entry.id}`;
+      const controller = new AbortController();
+      const work = Promise.resolve().then(() => entry.cleanup?.(this.sap, { signal: controller.signal }));
       try {
-        await withTimeout(entry.cleanup(this.sap), CLEANUP_TIMEOUT_MS, `cleanup of ${entry.type} ${entry.id}`);
+        await withTimeout(work, timeoutMs, what);
         entry.status = 'cleaned';
         log.info(`[sap-gui] cleaned ${entry.type} ${entry.id}`);
       } catch (error) {
         entry.status = 'cleanup-failed';
         entry.note = error instanceof Error ? error.message : String(error);
         log.warn(`[sap-gui] could NOT clean ${entry.type} ${entry.id}: ${entry.note}`);
+        if (!controller.signal.aborted && isTimeout(error)) {
+          controller.abort();
+          const settled = await settleWithin(work, graceMs);
+          if (!settled) {
+            stuck = `${entry.type} ${entry.id}`;
+            entry.note += ` (and it did not stop within ${graceMs}ms of being asked to)`;
+          }
+        }
       }
     }
     return [...this.items];
   }
 }
 
+class CleanupTimeout extends Error {}
+
+function isTimeout(error: unknown): boolean {
+  return error instanceof CleanupTimeout;
+}
+
 function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms}ms`)), ms);
+    timer = setTimeout(() => reject(new CleanupTimeout(`${what} took longer than ${ms}ms`)), ms);
   });
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** Waits until `work` has finished (either way) or `ms` passed; true if it finished. */
+async function settleWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout;
+  const gaveUp = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  const finished = work.then(
+    () => true as const,
+    () => true as const,
+  );
+  return Promise.race([finished, gaveUp]).finally(() => clearTimeout(timer));
 }
 
 /** Appends the final list to a per-process audit file (read by `sap-gui-data`). */
@@ -153,9 +214,16 @@ export function loadCreated(dir = DEFAULT_DATA_DIR): CreatedObject[] {
   if (!fs.existsSync(dir)) return [];
   const all: CreatedObject[] = [];
   for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort()) {
-    for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) {
-      if (line.trim()) all.push(JSON.parse(line) as CreatedObject);
-    }
+    const lines = fs.readFileSync(path.join(dir, file), 'utf8').split('\n');
+    lines.forEach((line, index) => {
+      if (!line.trim()) return;
+      try {
+        all.push(JSON.parse(line) as CreatedObject);
+      } catch {
+        // Skipping it would hide an orphan from a gate that trusts this list.
+        throw new Error(`${path.join(dir, file)} line ${index + 1} is not valid JSON - the created-data list is damaged, so it cannot be used as a gate`);
+      }
+    });
   }
   return all;
 }

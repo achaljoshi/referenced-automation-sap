@@ -304,7 +304,12 @@ export class SapLocator {
     );
   }
 
-  /** Put a value into the control: text into a field, an option into a drop-down, a tick into a checkbox. */
+  /**
+   * Put a value into the control: text into a field, an option into a drop-down, a tick into a checkbox.
+   * `checkMaxLength: true` also refuses a value longer than the field's MaxLength before typing, and afterwards reads the field back
+   * and fails if SAP kept nothing or cut the value short. Reformatting (upper-casing, leading zeros, date formats) is not a failure.
+   * Never checked for password fields.
+   */
   async fill(value: string, options: { checkMaxLength?: boolean } = {}): Promise<void> {
     const id = await this.id();
     const { type, changeable } = await this.sap.info(id);
@@ -339,7 +344,20 @@ export class SapLocator {
         );
       }
     }
-    await this.sap.set(id, 'text', value, { secret: type === 'GuiPasswordField' });
+    const secret = type === 'GuiPasswordField';
+    await this.sap.set(id, 'text', value, { secret });
+    if (options.checkMaxLength && !secret && value !== '') {
+      // SAP accepts an over-long or rejected entry without an error: it just keeps less. Read it back.
+      const kept = String((await this.sap.peekProp(id, 'text').catch(() => value)) ?? '');
+      const truncated = kept.length < value.length && value.toLowerCase().startsWith(kept.toLowerCase());
+      if (kept === '' || truncated) {
+        throw new AdapterError(
+          'sap-gui',
+          'fill',
+          `SAP did not accept "${value}" in ${this.description} (${id}): the field now holds "${kept}"`,
+        );
+      }
+    }
   }
 
   async clear(): Promise<void> {

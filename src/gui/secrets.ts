@@ -43,8 +43,11 @@ const runPowerShell: PowerShellRunner = (script, env = {}, stdin) => {
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 };
 
-const UNPROTECT = `Add-Type -AssemblyName System.Security; $b = [Convert]::FromBase64String((Get-Content -Raw -LiteralPath $env:SAP_SECRET_FILE).Trim()); [Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($b, $null, 'CurrentUser')))`;
-const PROTECT = `Add-Type -AssemblyName System.Security; $p = [Console]::In.ReadToEnd(); $b = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($p), $null, 'CurrentUser'); [Console]::Out.Write([Convert]::ToBase64String($b))`;
+// UTF-8 on both pipes, like the bridge (bridgeScript.ts): Windows PowerShell 5.1 otherwise uses the OEM code page, which mangles
+// non-ASCII characters - and a mangled password that is then submitted counts as a failed logon, which can lock the account.
+const UTF8 = `$u = New-Object System.Text.UTF8Encoding($false); [Console]::InputEncoding = $u; [Console]::OutputEncoding = $u; `;
+const UNPROTECT = `${UTF8}Add-Type -AssemblyName System.Security; $b = [Convert]::FromBase64String((Get-Content -Raw -LiteralPath $env:SAP_SECRET_FILE).Trim()); [Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($b, $null, 'CurrentUser')))`;
+const PROTECT = `${UTF8}Add-Type -AssemblyName System.Security; $p = [Console]::In.ReadToEnd(); $b = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($p), $null, 'CurrentUser'); [Console]::Out.Write([Convert]::ToBase64String($b))`;
 
 export interface DpapiOptions {
   /** Where the protected files live. Default `.secrets` in the working directory (git-ignored). */

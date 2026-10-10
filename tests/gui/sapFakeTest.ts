@@ -15,6 +15,14 @@ process.env.SAP_LANGUAGE ??= 'EN';
  * the conversion and the waiting, not that a recording matches your real system.)
  */
 export const test = sapGuiTest.extend({
+  // A recording starts at the logon screen. With the default (one session per worker, kept between tests) the result would
+  // depend on which test the worker ran before - and with a single worker (this repo's default) that is always another one.
+  sapGuiReuse: [
+    async ({}, use) => {
+      await use('test');
+    },
+    { scope: 'worker' },
+  ],
   // A function is only accepted here as a fixture implementation (in an
   // `{ option: true }` slot Playwright would call it as one), so hand it over via use().
   // Worker-scoped, like the connection that consumes it.

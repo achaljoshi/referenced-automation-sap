@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import { sapGuiTest as test } from '../sapFakeTest';
+import { sapExpect as expect } from '../../../src';
 import { csvUtils } from '@automation/referenced-automation-utils';
 import { CONSTANTS, LOCATORS, Va01CreateOrderFrame, Va01CreateOrderScreen1Page, Va01CreateOrderScreen2Page, Va01CreateOrderScreen3Page } from './pages/Va01CreateOrderPages';
 
@@ -48,5 +49,6 @@ for (const [index, data] of rows.entries()) {
     await screen3.sapmv45atctrlUErfAuftragTable.cell('ctxtRV45A-MABNR', 1, 0).fill(field(data, 'rv45aMabnr_c1r0')); // vbs:35
     await screen3.sapmv45atctrlUErfAuftragTable.cell('txtRV45A-KWMENG', 3, 0).fill(field(data, 'rv45aKwmeng_c3r0')); // vbs:36
     await screen3.toolbarButton(11).press(); // vbs:37
+    await expect(sap).toHaveStatusMessage(/has been saved/i);
   });
 }

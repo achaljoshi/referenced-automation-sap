@@ -31,6 +31,7 @@ export async function startRealTransport(): Promise<{ transport: SapGuiTransport
   return {
     transport: await PowerShellTransport.start({
       powershellPath: env.getOptional('SAP_GUI_POWERSHELL'),
+      scriptDir: env.getOptional('SAP_GUI_POWERSHELL_SCRIPT_DIR'),
     }),
     name: 'PowerShell',
   };

@@ -19,6 +19,6 @@ Feature: Test data that is unique and fresh
     And I press Enter
     And I enter "1000" in the field labelled "Sold-To Party"
     And I click the toolbar button "Save"
-    And I remember the number from the status bar matching "Order (\d+)" as "order"
+    And the saved sales order is registered for cleanup as "order"
     Then the variable "order" matches "\d+"
     And the status bar shows "Order {{order}}"

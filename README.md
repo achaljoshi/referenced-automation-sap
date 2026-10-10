@@ -36,6 +36,8 @@ npm test
 
 ## Verifying this repo's own tests
 
+`npm run test:smoke` and `npm run test:framework` generate the Gherkin features first (`bddgen`) and end with `scripts/min-executed.js`: the run **fails when fewer tests executed than expected** and prints how many were skipped and why (for example `skipped 8x: needs a JDK` - without a JDK `tests/gui/javaBridge.spec.ts` exercises nothing, and the run would otherwise look green). Parallelism: attach mode drives one SAP window, so `playwright.config.ts` runs one worker there (see [Parallel workers](#parallel-workers)).
+
 Two things are tested, deliberately kept separate:
 
 1. **`tests/fioriPage.spec.ts`** - `byControlId`/`waitForUI5Ready` against a small local fixture (`tests/support/fioriStyleFixture.html`) that mimics UI5's id-prefixing convention. Deterministic, no network dependency, no flake risk.
@@ -201,10 +203,12 @@ Put the ids in a page object (`tests/sapgui/pages/`) once you have more than a c
 ```bash
 npm run build
 cp ~/Documents/SAP/SAP\ GUI/my_recording.vbs recordings/
-npm run convert                                   # recordings/*.vbs -> tests/sapgui/*.spec.ts
+npm run convert                                   # recordings/*.vbs -> tests/sapgui/*.spec.ts (already runs with --strict)
 # or one file, with options:
-npx sap-vbs-to-playwright recordings/my_recording.vbs --out tests/sapgui --strict
+npx sap-vbs-to-playwright recordings/my_recording.vbs --out tests/sapgui --strict --expect-status "has been saved"
 ```
+
+**A converted test has no assertion** - a recording only performs actions, so left alone it would pass whenever SAP does not throw. Unless you give it one with `--expect-status <regex>` (the status bar must match at the end), the file says so in its header, ends with a `// TODO(converter): no assertion` and a guard that **fails the test** until you replace it with a check of the business result (`--allow-no-assertion` leaves the guard out, for spikes). `npm run convert`, `convert:pages` and `convert:data` pass `--strict`, which exits 1 when something could not be converted (control flow, unsupported lines); the note that a password was replaced by an environment read does not count against it.
 
 What a converted line looks like - the recorder's ids are used **unchanged**:
 
@@ -221,14 +225,14 @@ await sap.set('wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG', 'columns.elementAt(1)
 
 See [`examples/va01_create_order.vbs`](examples/va01_create_order.vbs) and the spec generated from it, [`tests/gui/va01_create_order.spec.ts`](tests/gui/va01_create_order.spec.ts).
 
-Options: `--out`, `--test-import <module>` (your own base test, to add project fixtures), `--param <id-regex>=<ENV_VAR>` (read a field from the environment), `--tag`, `--keep-session-prefix`, `--no-line-comments`, `--strict` (exit 1 if anything needs a human - use it in CI).
+Options: `--out`, `--test-import <module>` (your own base test, to add project fixtures), `--param <id-regex>=<ENV_VAR>` (read a field from the environment), `--tag`, `--keep-session-prefix`, `--no-line-comments`, `--expect-status <regex>`, `--expect-import <module>`, `--allow-no-assertion`, `--strict` (exit 1 if anything needs a human - use it in CI).
 
 ### Why the converted test doesn't fail the way a raw recording does
 
 A recording has **no waits**: it works when you record it (you were slow), and fails when it runs at machine speed because the next screen isn't there yet. `SapGuiSession` fixes that in one place instead of in every script:
 
 - before every step it waits for SAP to be idle **and** for the element to exist;
-- after a step that triggers a server round trip (`press`, `sendVKey`, `startTransaction`, ...) it waits for SAP to settle;
+- after a step that triggers a server round trip (`press`, `sendVKey`, `startTransaction`, ...) it waits for the server's **answer** to reach the GUI - SAP's round-trip counter moving, or the screen/title/window count changing - and only then for SAP to be idle (`Busy=false` is also what SAP reports in the instant before the GUI notices the request; on a slow link that used to mean acting on the previous screen). An action that never reaches the server (a tab switch) costs a bounded quiet period, `SAP_GUI_ROUNDTRIP_WAIT_MS` (default 250; `0` restores the old check - raise it on a slow link). This is tested against the simulator and stand-in bridges that delay their answer; it has not been measured on a real SAP GUI;
 - a "not found" while the screen is mid-change is retried until the timeout, not failed;
 - `WScript.Sleep` lines are dropped - a fixed sleep is too short on a slow day and too slow on every other;
 - a real failure tells you what **is** on the screen (nearest id that exists, what it contains, the status bar text) so the recording can be repaired without opening SAP;
@@ -246,11 +250,16 @@ A recording has **no waits**: it works when you record it (you were slow), and f
 | `x = findById(...).text` | converted to `let x = await sap.get(...)` |
 | `WScript.Sleep n` | dropped (see above) |
 | the recorder's connect-to-SAP preamble | dropped - the fixture attaches the session |
-| typed passwords | **never copied** - replaced by `env.get('SAP_PASSWORD')` |
+| typed passwords, PINs, one-time codes, tokens | replaced by environment reads (`SAP_PASSWORD`, `SAP_PIN`, `SAP_OTP`, `SAP_TOKEN`): by the field's name, by a variable with such a name (`password = "..."`), and by a variable that later flows into such a field (`pw = "..."` ... `.text = pw`); literals copied into `TODO` comments are redacted when the line looks secret. A secret typed into an innocuously named field cannot be recognised - review the output and run `npm run security` before committing |
 | `If` / `For` / `Do` / `Select Case` / `Sub` / `MsgBox` | **not guessed**: emitted as a `// TODO(manual, vbs:N)` with the original line, and listed in the spec's header. Everything inside a block is held back too, so nothing runs unconditionally that was conditional |
+| a `With` on something the converter cannot resolve | the `With` and **every statement inside it** are `TODO`s - a leading `.text = ...` is never read against the session |
 | a variable inside a chained path (`getAbsoluteRow(i)`) | flagged as TODO |
 
 A recording is straight-line by nature, so most are converted completely. `--strict` makes CI fail rather than let a TODO slip through.
+
+### Parallel workers
+
+`SAP_GUI_MODE=attach` uses the one SAP session you already have open, so two workers would type into the same window. `playwright.config.ts` sets `workers: 1` and `fullyParallel: false` whenever attach mode can reach a real SAP (the environment's `WORKERS` is ignored, with a log line saying so), and the `sap` fixture refuses attach mode if Playwright runs more than one worker anyway (`--workers=4` on the command line). Parallel workers are honoured where each one owns its SAP: the simulator (`SAP_GUI_SIMULATOR=true`), a custom transport, or `SAP_GUI_MODE=open` (a connection per worker; give each its own user with `SAP_USER_POOL`). Note that the committed `.env.dev` / `.env.qa` say `open`, `.env.example` says `attach`.
 
 ### Setting up a Windows machine
 
@@ -280,7 +289,7 @@ SAP GUI Scripting is a Windows COM API: **tests that drive real SAP must run on 
 `FakeSapGui` / `createSampleSapSystem()` is an in-memory SAP with a logon -> VA01 -> save flow. `tests/gui/sapFakeTest.ts` wires it into a `test`, so a conversion can be executed on any machine:
 
 ```bash
-npx sap-vbs-to-playwright examples/va01_create_order.vbs --out tests/gui --test-import ./sapFakeTest
+npx sap-vbs-to-playwright examples/va01_create_order.vbs --out tests/gui --test-import ./sapFakeTest --expect-status "has been saved" --expect-import ../../src
 npm run test:framework
 ```
 
@@ -288,7 +297,7 @@ It only knows the screens it is given - it proves the converter and the waiting,
 
 ### What has and has not been verified
 
-Verified here (macOS, no SAP): every layer above the transport - parser/generator (including a realistic VA01 recording), the session's waiting, retries and error messages, locators, type-driven actions, retrying assertions, pop-up handlers, journal/evidence, session reuse, secrets handling, the CLI - against a simulator with screen-change latency, with negative controls showing the same steps fail without the framework. The bridge script is checked to be ASCII-only with no network/file/registry calls (its only `Start-Process` is the SAP Logon launch).
+Verified here (macOS, no SAP): every layer above the transport - parser/generator (including a realistic VA01 recording), the session's waiting, retries and error messages, locators, type-driven actions, retrying assertions, pop-up handlers, journal/evidence, session reuse, secrets handling, the CLI - against a simulator with screen-change latency, with negative controls showing the same steps fail without the framework. The bridge script is checked to be ASCII-only with no network/file/registry calls (its only `Start-Process` is the SAP Logon launch). "Control not found", "connection dead" and "bridge hung/closed" are classified and recovered from by code that is executed in the Java helper's tests and in the process-transport tests; the same classification in the PowerShell script is only checked as text.
 
 **Not verified until it runs on a Windows machine with SAP GUI**: the PowerShell bridge itself (it could not be executed without Windows PowerShell and SAP GUI), COM behaviour on your SAP release, and that a particular recording replays against your system. Run `npm run doctor` first, then convert and run one real recording - and report anything the doctor or the failure message does not explain, because that is the part that was written from the documented COM API rather than observed.
 

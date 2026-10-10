@@ -9,6 +9,7 @@ import {
   type SapGuiCommand,
   type SapGuiTransport,
   type SapGuiValue,
+  type SapProgress,
 } from './types';
 
 export interface FakeElementSpec {
@@ -53,6 +54,16 @@ export interface FakeSapGuiOptions {
    * the way real SAP does.
    */
   transitionDelayMs?: number;
+  /**
+   * How long the "server" takes to answer after an action that changes the screen. Until it answers, the OLD screen is
+   * still showing, Busy reads false and RoundTrips has not moved - which is exactly the window in which a "Busy=false twice"
+   * idle check declares the session idle and the next step acts on the previous screen. 0 (default): the answer is instant.
+   */
+  responseLagMs?: number;
+  /** Text of the "control could not be found" error. Real SAP GUI localises it; a bridge must not depend on the English wording. Default the English text. */
+  notFoundMessage?: string;
+  /** false: behave like a SAP GUI release whose Info.RoundTrips is not available (progress() then reports null). Default true. */
+  reportRoundTrips?: boolean;
 }
 
 export interface FakeCall {
@@ -136,6 +147,8 @@ export class FakeSapGui implements SapGuiTransport {
   private lastTransitionMs = 0;
   private roundTrips = 0;
   private closed = false;
+  private lost = false;
+  private pending?: { target: string; at: number };
 
   constructor(private readonly options: FakeSapGuiOptions) {
     this.current = this.screen(options.start);
@@ -143,7 +156,13 @@ export class FakeSapGui implements SapGuiTransport {
   }
 
   get currentScreen(): string {
+    this.applyPending();
     return this.current.name;
+  }
+
+  /** From now on every request fails like a dead COM connection (SESSION_LOST) - SAP GUI closed or the RPC server went away. */
+  simulateSessionLoss(): void {
+    this.lost = true;
   }
 
   private screen(name: string): FakeScreen {
@@ -194,7 +213,10 @@ export class FakeSapGui implements SapGuiTransport {
 
   private require(id: string): void {
     if (!this.visible(id))
-      throw new SapGuiTransportError(`The control could not be found by id: ${id}`, 'NOT_FOUND');
+      throw new SapGuiTransportError(
+        this.options.notFoundMessage ?? `The control could not be found by id: ${id}`,
+        'NOT_FOUND',
+      );
   }
 
   private hasScreen(name: string): boolean {
@@ -212,15 +234,35 @@ export class FakeSapGui implements SapGuiTransport {
   }
 
   private go(target: string | undefined): void {
-    if (target) {
-      this.lastTransitionMs = this.options.transitionDelayMs ?? 0;
-      this.roundTrips++;
-      this.enter(this.screen(target), this.lastTransitionMs);
+    if (!target) return;
+    const lag = this.options.responseLagMs ?? 0;
+    if (lag > 0) this.pending = { target, at: Date.now() + lag };
+    else this.arrive(target);
+  }
+
+  /** The server's answer reaches the GUI: the new screen appears (busy while it renders) and the round-trip counter moves. */
+  private arrive(target: string): void {
+    this.lastTransitionMs = this.options.transitionDelayMs ?? 0;
+    this.roundTrips++;
+    this.enter(this.screen(target), this.lastTransitionMs);
+  }
+
+  private applyPending(): void {
+    if (this.pending && Date.now() >= this.pending.at) {
+      const { target } = this.pending;
+      this.pending = undefined;
+      this.arrive(target);
     }
   }
 
   async request(command: SapGuiCommand): Promise<unknown> {
     if (this.closed) throw new SapGuiTransportError('bridge is closed', 'BRIDGE_EXITED');
+    if (this.lost)
+      throw new SapGuiTransportError(
+        'The RPC server is unavailable. (0x800706BA) - SAP GUI is gone',
+        'SESSION_LOST',
+      );
+    this.applyPending();
     switch (command.op) {
       case 'ping':
         return 'pong';
@@ -232,6 +274,8 @@ export class FakeSapGui implements SapGuiTransport {
         return null;
       case 'busy':
         return this.busy();
+      case 'progress':
+        return this.progressOf();
       case 'exists':
         return this.visible(command.id);
       case 'get': {
@@ -350,6 +394,20 @@ export class FakeSapGui implements SapGuiTransport {
     };
   }
 
+  private progressOf(): SapProgress {
+    const c = this.current.context ?? { transaction: '', program: 'SAPMSYST', screen: '0100' };
+    let windows = 1;
+    while (this.visible(`wnd[${windows}]`)) windows++;
+    return {
+      roundTrips: this.options.reportRoundTrips === false ? null : this.roundTrips,
+      transaction: c.transaction === '$TCODE' ? this.enteredTcode : c.transaction,
+      program: c.program,
+      screen: c.screen,
+      title: String(this.read('wnd[0]', 'text') ?? ''),
+      windows,
+    };
+  }
+
   private infoOf(id: string): ControlInfo {
     const spec = this.current.elements[id];
     return {
@@ -414,6 +472,12 @@ export interface SampleSapSystemOptions {
   password?: string;
   client?: string;
   transitionDelayMs?: number;
+  /** See FakeSapGuiOptions.responseLagMs. */
+  responseLagMs?: number;
+  /** See FakeSapGuiOptions.notFoundMessage. */
+  notFoundMessage?: string;
+  /** See FakeSapGuiOptions.reportRoundTrips. */
+  reportRoundTrips?: boolean;
   /** After a correct logon, show the "user already logged on" pop-up first (like a real system does when the user has another session). */
   multipleLogon?: boolean;
 }
@@ -424,20 +488,36 @@ export interface SampleSapSystemOptions {
  * a table-control cell). Used by the example recording and the framework's
  * own tests.
  */
-export function createSampleSapSystem(options: SampleSapSystemOptions = {}): FakeSapGui {
+/** What the sample system has done to sales orders: lets a test prove that an order was created and, later, deleted. */
+export interface SampleSapState {
+  /** Order numbers saved through VA01, in order. */
+  created: number[];
+  /** Order numbers deleted through VA02, in order. */
+  deleted: number[];
+}
+
+export function createSampleSapSystem(options: SampleSapSystemOptions = {}): FakeSapGui & { readonly sample: SampleSapState } {
   const {
     user = 'TESTUSER',
     password = 'correct-horse',
     client = '100',
     transitionDelayMs = 150,
     multipleLogon = false,
+    responseLagMs,
+    notFoundMessage,
+    reportRoundTrips,
   } = options;
   const wrongLogin = 'Name or password is incorrect (repeat logon)';
   let orderCounter = 0; // each save in this system gets the next order number
+  const sample: SampleSapState = { created: [], deleted: [] };
+  let changing = 0; // the order VA02 is showing
 
-  return new FakeSapGui({
+  const fake = new FakeSapGui({
     start: 'logon',
     transitionDelayMs,
+    responseLagMs,
+    notFoundMessage,
+    reportRoundTrips,
     screens: [
       {
         name: 'logon',
@@ -507,13 +587,13 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
           'wnd[0]/sbar': { type: 'GuiStatusbar' },
         },
         onTransaction: (tcode) =>
-          tcode.toUpperCase() === 'VA01' ? 'va01Initial' : 'otherTransaction',
+          ({ VA01: 'va01Initial', VA02: 'va02Initial' })[tcode.toUpperCase()] ?? 'otherTransaction',
         onVKey: (vKey, ctx) => {
           if (vKey !== 0) return undefined;
           const code = String(ctx.get('wnd[0]/tbar[0]/okcd', 'text'))
             .replace(/^\/n/i, '')
             .toUpperCase();
-          return code === 'VA01' ? 'va01Initial' : code ? 'otherTransaction' : undefined;
+          return ({ VA01: 'va01Initial', VA02: 'va02Initial' })[code] ?? (code ? 'otherTransaction' : undefined);
         },
       },
       {
@@ -577,13 +657,85 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
       {
         name: 'saved',
         context: { transaction: 'VA01', program: 'SAPMV45A', screen: '4001' },
-        status: () => `Standard Order ${4711 + orderCounter++} has been saved`,
+        status: () => {
+          const number = 4711 + orderCounter++;
+          sample.created.push(number);
+          return `Standard Order ${number} has been saved`;
+        },
         elements: {
           'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Create Standard Order: Overview' } },
           'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
           'wnd[0]/sbar': { type: 'GuiStatusbar', props: { messageType: 'S' } },
         },
       },
+      {
+        // Change Sales Order: ask for the order number first.
+        name: 'va02Initial',
+        context: { transaction: 'VA02', program: 'SAPMV45A', screen: '0102' },
+        elements: {
+          'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Change Sales Order: Initial Screen' } },
+          'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
+          'wnd[0]/usr/ctxtVBAK-VBELN': { type: 'GuiCTextField', props: { leftLabel: 'Order' } },
+          'wnd[0]/sbar': { type: 'GuiStatusbar' },
+        },
+        onVKey: (vKey, ctx) => {
+          if (vKey !== 0) return undefined;
+          changing = Number(ctx.get('wnd[0]/usr/ctxtVBAK-VBELN', 'text'));
+          return sample.created.includes(changing) && !sample.deleted.includes(changing) ? 'va02Overview' : 'va02Missing';
+        },
+      },
+      {
+        name: 'va02Missing',
+        context: { transaction: 'VA02', program: 'SAPMV45A', screen: '0102' },
+        status: () => `Sales document ${changing} does not exist`,
+        elements: {
+          'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Change Sales Order: Initial Screen' } },
+          'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
+          'wnd[0]/usr/ctxtVBAK-VBELN': { type: 'GuiCTextField', props: { leftLabel: 'Order' } },
+          'wnd[0]/sbar': { type: 'GuiStatusbar', props: { messageType: 'E' } },
+        },
+      },
+      {
+        name: 'va02Overview',
+        context: { transaction: 'VA02', program: 'SAPMV45A', screen: '4001' },
+        elements: {
+          'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Change Standard Order: Overview' } },
+          'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
+          'wnd[0]/tbar[1]/btn[14]': { type: 'GuiButton', props: { tooltip: 'Delete' } },
+          'wnd[0]/sbar': { type: 'GuiStatusbar' },
+        },
+        onPress: { 'wnd[0]/tbar[1]/btn[14]': () => 'va02DeleteConfirm' },
+      },
+      {
+        name: 'va02DeleteConfirm',
+        context: { transaction: 'VA02', program: 'SAPMV45A', screen: '4001' },
+        elements: {
+          'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Change Standard Order: Overview' } },
+          'wnd[1]': { type: 'GuiModalWindow', props: { text: 'Delete Document' } },
+          'wnd[1]/usr/btnSPOP-OPTION1': { type: 'GuiButton', props: { text: 'Yes' } },
+          'wnd[1]/usr/btnSPOP-OPTION2': { type: 'GuiButton', props: { text: 'No' } },
+          'wnd[0]/sbar': { type: 'GuiStatusbar' },
+        },
+        onPress: {
+          'wnd[1]/usr/btnSPOP-OPTION1': () => 'va02Deleted',
+          'wnd[1]/usr/btnSPOP-OPTION2': () => 'va02Overview',
+        },
+      },
+      {
+        name: 'va02Deleted',
+        context: { transaction: 'VA02', program: 'SAPMV45A', screen: '0102' },
+        status: () => {
+          sample.deleted.push(changing);
+          return `Standard Order ${changing} has been deleted`;
+        },
+        elements: {
+          'wnd[0]': { type: 'GuiMainWindow', props: { text: 'Change Sales Order: Initial Screen' } },
+          'wnd[0]/tbar[0]/okcd': { type: 'GuiOkCodeField' },
+          'wnd[0]/usr/ctxtVBAK-VBELN': { type: 'GuiCTextField', props: { leftLabel: 'Order' } },
+          'wnd[0]/sbar': { type: 'GuiStatusbar', props: { messageType: 'S' } },
+        },
+      },
     ],
   });
+  return Object.assign(fake, { sample });
 }

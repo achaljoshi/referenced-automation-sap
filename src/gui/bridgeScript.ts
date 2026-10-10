@@ -23,6 +23,14 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8
 $script:session = $null
+# Set when FindById itself failed for a reason other than a dead connection: that is "no such control", whatever
+# language SAP GUI words the message in. Reset for every command.
+$script:notFound = $false
+
+# HRESULTs that mean the COM connection to SAP GUI is gone (retrying cannot help), as signed 32-bit integers:
+# 0x800706BA RPC server unavailable, 0x800706BE RPC call failed, 0x800706BF RPC call failed (did not execute),
+# 0x80010108 object disconnected from its clients, 0x80010007 / 0x80010012 server died, 0x800401FD object not connected.
+$script:deadHResults = @(-2147023174, -2147023170, -2147023169, -2147417848, -2147418105, -2147418094, -2147220995)
 
 function Send-Reply($rid, $ok, $value, $message, $code) {
     $reply = [ordered]@{ rid = $rid; ok = $ok }
@@ -41,6 +49,20 @@ function Get-ComProperty($target, $name, $comArgs) {
 
 function Set-ComProperty($target, $name, $value) {
     [System.__ComObject].InvokeMember($name, [System.Reflection.BindingFlags]::SetProperty, $null, $target, [object[]]@($value)) | Out-Null
+}
+
+function Get-ComException($ex) {
+    while ($null -ne $ex) {
+        if ($ex -is [System.Runtime.InteropServices.COMException]) { return $ex }
+        $ex = $ex.InnerException
+    }
+    return $null
+}
+
+function Test-DeadSession($ex) {
+    $com = Get-ComException $ex
+    if ($null -eq $com) { return $false }
+    return ($script:deadHResults -contains [int]$com.ErrorCode)
 }
 
 function Convert-Out($value) {
@@ -84,8 +106,12 @@ function Get-ScriptingEngine($logonPath) {
     throw 'Started SAP Logon but its scripting engine did not appear within 60 seconds. Is scripting enabled (SAP GUI Options > Accessibility and Scripting > Scripting)?'
 }
 
+# A property a control simply does not have reads as null; a dead connection is not "no such property" and is rethrown.
 function Read-Prop($target, $name) {
-    try { return Convert-Out (Get-ComProperty $target $name $null) } catch { return $null }
+    try { return Convert-Out (Get-ComProperty $target $name $null) } catch {
+        if (Test-DeadSession $_.Exception) { throw }
+        return $null
+    }
 }
 
 function Read-LabelText($target, $labelProp) {
@@ -137,7 +163,13 @@ function Search-Controls($node, $c, $results, $depth) {
 
 function Find-Element($id) {
     if ([string]::IsNullOrEmpty($id)) { return ,$script:session }
-    return ,(Invoke-Com $script:session 'FindById' ([object[]]@($id)))
+    try {
+        return ,(Invoke-Com $script:session 'FindById' ([object[]]@($id)))
+    } catch {
+        if (Test-DeadSession $_.Exception) { throw }
+        if ($null -ne (Get-ComException $_.Exception)) { $script:notFound = $true }
+        throw
+    }
 }
 
 # SAP's COM layer rejects 64-bit integers; JSON numbers can arrive as Int64.
@@ -172,6 +204,7 @@ while ($true) {
     if ($line.Trim().Length -eq 0) { continue }
     $cmd = $null
     $rid = 0
+    $script:notFound = $false
     try {
         $cmd = $line | ConvertFrom-Json
         $rid = $cmd.rid
@@ -193,10 +226,34 @@ while ($true) {
                 $script:session = Get-ComProperty $connection 'Children' ([object[]]@(0))
                 Send-Reply $rid $true $null $null $null
             }
+            'progress' {
+                $sessionInfo = Get-ComProperty $script:session 'Info' $null
+                $windows = 1
+                foreach ($n in 1..4) {
+                    $present = $false
+                    try { $present = ($null -ne (Find-Element ('wnd[' + $n + ']'))) } catch {
+                        if (Test-DeadSession $_.Exception) { throw }
+                    }
+                    if (-not $present) { break }
+                    $windows = $n + 1
+                }
+                $progress = [ordered]@{
+                    roundTrips = Read-Prop $sessionInfo 'RoundTrips'
+                    transaction = [string](Read-Prop $sessionInfo 'Transaction')
+                    program = [string](Read-Prop $sessionInfo 'Program')
+                    screen = [string](Read-Prop $sessionInfo 'ScreenNumber')
+                    title = [string](Read-Prop (Find-Element 'wnd[0]') 'Text')
+                    windows = $windows
+                }
+                Send-Reply $rid $true $progress $null $null
+            }
             'busy' { Send-Reply $rid $true ([bool](Get-ComProperty $script:session 'Busy' $null)) $null $null }
             'exists' {
                 $found = $false
-                try { $found = ($null -ne (Find-Element $cmd.id)) } catch { $found = $false }
+                try { $found = ($null -ne (Find-Element $cmd.id)) } catch {
+                    if (Test-DeadSession $_.Exception) { throw }
+                    $found = $false
+                }
                 Send-Reply $rid $true $found $null $null
             }
             'get' {
@@ -271,8 +328,12 @@ while ($true) {
     } catch {
         $message = $_.Exception.Message
         if ($_.Exception.InnerException) { $message = $_.Exception.InnerException.Message }
+        # Classified by what failed, not by SAP GUI's (localised) wording: a dead connection by HRESULT, a missing control
+        # by FindById itself failing. The English text is only a fallback for a failure that did not come through Find-Element.
         $code = 'ERROR'
-        if ($message -match 'could not be found') { $code = 'NOT_FOUND' }
+        if (Test-DeadSession $_.Exception) { $code = 'SESSION_LOST' }
+        elseif ($script:notFound) { $code = 'NOT_FOUND' }
+        elseif ($message -match 'could not be found') { $code = 'NOT_FOUND' }
         Send-Reply $rid $false $null $message $code
     }
 }

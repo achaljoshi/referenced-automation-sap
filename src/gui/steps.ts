@@ -123,8 +123,14 @@ export function registerSapSteps({ Given, When, Then }: BddSteps): void {
     },
   );
 
+  // Waits for evidence that SAP has answered the last action (a success/info/warning message, or the screen moving on) and
+  // then checks for an error (E) or abort (A) - "no error yet" on a screen that has not changed proves nothing.
   Then('the status bar does not show an error', async ({ sap }: SapStepFixtures) => {
-    await expect(sap).not.toHaveStatusMessage(/./, { type: 'E' });
+    await expect(sap).toHaveNoStatusError();
+  });
+
+  Then('the status bar does not show an error right now', async ({ sap }: SapStepFixtures) => {
+    await expect(sap).toHaveNoStatusError({ requireOutcome: false });
   });
 
   Then(

@@ -136,8 +136,12 @@ public class Dispatch {
                 break;
             case "session":
                 if (n.equals("findbyid")) {
-                    Obj found = CONTROLS.get(String.valueOf(args[0]));
-                    if (found == null) throw new ComFailException("The control could not be found by id.");
+                    String id = String.valueOf(args[0]);
+                    // A dead connection: the HRESULT says so (RPC_E_DISCONNECTED), not the message.
+                    if (id.endsWith("txtDEAD")) throw new ComFailException("Der Server ist nicht verfuegbar.", 0x80010108);
+                    Obj found = CONTROLS.get(id);
+                    // SAP GUI localises this message: the bridge must not depend on the English wording.
+                    if (found == null) throw new ComFailException("Das Steuerelement konnte mit der ID nicht gefunden werden.");
                     return new Variant(new Dispatch(found));
                 }
                 if (n.equals("startransaction") || n.equals("starttransaction")) return new Variant(null);

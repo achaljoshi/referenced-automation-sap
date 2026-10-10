@@ -36,6 +36,23 @@ export interface SapContext {
   roundTrips?: number;
 }
 
+/**
+ * A cheap "has anything happened yet?" reading: SAP's server round-trip counter plus what is on screen. Taken before an
+ * action and again after it, a change proves the server answered - Busy=false alone cannot (it is false in the moment
+ * between the request leaving and SAP GUI noticing it is waiting).
+ */
+export interface SapProgress {
+  /** Session.Info.RoundTrips; null when this SAP GUI release does not report it (then the screen fields decide). */
+  roundTrips: number | null;
+  transaction: string;
+  program: string;
+  screen: string;
+  /** Title of the main window. */
+  title: string;
+  /** How many windows are open (1 = main window only, 2 = a pop-up in front, ...). */
+  windows: number;
+}
+
 /** How to find controls without knowing their technical id: every given field must match. */
 export interface FindCriteria {
   /** Search below this id. Default the main window. */
@@ -72,6 +89,7 @@ export type SapGuiCommand =
   | { op: 'info'; id: string }
   | { op: 'context' }
   | { op: 'busy' }
+  | { op: 'progress' }
   | { op: 'quit' };
 
 export interface SapGuiChild {
@@ -93,11 +111,18 @@ export interface SapGuiTransport {
   close(): Promise<void>;
 }
 
-/** Thrown by a transport when SAP GUI (or the bridge) reports a failure. `code` is 'NOT_FOUND' when the technical id doesn't exist on the current screen. */
+/**
+ * Thrown by a transport when SAP GUI (or the bridge) reports a failure. `code`:
+ *  - NOT_FOUND     the technical id doesn't exist on the current screen (the one code the session retries)
+ *  - SESSION_LOST  the COM connection to SAP GUI is dead (RPC server unavailable, object disconnected, ...): retrying is pointless
+ *  - TIMEOUT       the bridge did not answer in time; the transport kills the bridge, so every later request fails fast
+ *  - BRIDGE_EXITED the bridge process is gone (crashed, killed, pipe closed)
+ *  - ERROR         anything else SAP GUI or the bridge reported
+ */
 export class SapGuiTransportError extends Error {
   constructor(
     message: string,
-    readonly code: 'NOT_FOUND' | 'ERROR' | 'TIMEOUT' | 'BRIDGE_EXITED' = 'ERROR',
+    readonly code: 'NOT_FOUND' | 'SESSION_LOST' | 'ERROR' | 'TIMEOUT' | 'BRIDGE_EXITED' = 'ERROR',
   ) {
     super(message);
     this.name = 'SapGuiTransportError';

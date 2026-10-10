@@ -147,6 +147,8 @@ test.describe('the committed example', () => {
       sapImport: '../../../../src',
       tag: '@sapgui-sample',
       dataDriven: true,
+      expectStatus: 'has been saved',
+      expectImport: '../../../src',
     });
     const dir = path.join(root, 'tests/gui/generated');
     expect(fs.readFileSync(path.join(dir, 'va01_create_order.spec.ts'), 'utf8')).toBe(generated.spec);

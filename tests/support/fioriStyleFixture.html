@@ -6,6 +6,13 @@
        path prefix, then "--", then the developer-assigned logical id. -->
   <button id="__component0---mainView--addToCartBtn">Add to cart</button>
 
+  <!-- ids that end the same way but belong to other controls: 'Btn' must not find them -->
+  <button id="__component0---mainView--SaveBtn">Save</button>
+  <button id="__component0---mainView--Btn">Plain</button>
+  <!-- a control with no view in front of it, and one whose id has a quote in it -->
+  <button id="standaloneBtn">Standalone</button>
+  <button id='__component0---mainView--odd"id'>Odd</button>
+
   <div id="busy-overlay" class="sapUiLocalBusyIndicator" style="display:none;">Loading...</div>
 
   <script>

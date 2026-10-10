@@ -1,4 +1,5 @@
 import { sapGuiTest as test } from './sapFakeTest';
+import { sapExpect as expect } from '../../src';
 import { loadEnv } from '@automation/referenced-automation-utils';
 
 const env = loadEnv();
@@ -77,4 +78,5 @@ test('recorded: va01_create_order @sapgui-sample', async ({ sap }) => {
   await sap.setText(LOCATORS.rv45aMabnrC1R0, CONSTANTS.inputs.rv45aMabnrC1R0); // vbs:35
   await sap.setText(LOCATORS.rv45aKwmengC3R0, CONSTANTS.inputs.rv45aKwmengC3R0); // vbs:36
   await sap.press(LOCATORS.toolbarButton11); // vbs:37
+  await expect(sap).toHaveStatusMessage(/has been saved/i);
 });

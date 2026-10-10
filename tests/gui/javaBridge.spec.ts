@@ -15,7 +15,11 @@ const root = path.resolve(__dirname, '../..');
 const hasJdk = spawnSync('javac', ['-version']).status === 0 && spawnSync('java', ['-version']).status === 0;
 let classes = '';
 
-test.skip(!hasJdk, 'needs a JDK (javac and java on PATH)');
+// Without a JDK EVERY test in this file is skipped and the run is still green: the Java/JACOB helper is then not exercised at all.
+// That is visible, not silent: the skip reason below is counted and printed by scripts/min-executed.js at the end of
+// `npm run test:smoke` / `test:framework` ("skipped Nx: needs a JDK ..."), which also fails a run that executed too little.
+// Put a JDK in the CI image to run these (see .gitlab-ci.yml, job `test`).
+test.skip(!hasJdk, 'needs a JDK (javac and java on PATH) - the Java/JACOB bridge helper was NOT exercised');
 
 test.beforeAll(() => {
   classes = fs.mkdtempSync(path.join(os.tmpdir(), 'sapbridge-java-'));
@@ -60,6 +64,33 @@ test.describe('the Java bridge speaks the protocol', () => {
     expect(unknownOp.code).toBe('ERROR');
     expect(unknownOp.message).toContain('Unknown op');
     expect(await transport.request({ op: 'ping' })).toBe('pong'); // still alive
+    await transport.close();
+  });
+
+  test('NOT_FOUND does not depend on the wording: the (German) message of a failed FindById is classified by the failure, not its text', async () => {
+    const transport = await attached();
+    const missing = (await transport.request({ op: 'get', id: 'wnd[0]/usr/nope', prop: 'text' }).catch((e: unknown) => e)) as SapGuiTransportError;
+    expect(missing.message).toContain('konnte mit der ID nicht gefunden werden'); // the stub's FindById speaks German
+    expect(missing.message).not.toContain('could not be found');
+    expect(missing.code).toBe('NOT_FOUND');
+    expect(await transport.request({ op: 'exists', id: 'wnd[0]/usr/nope' })).toBe(false);
+    await transport.close();
+  });
+
+  test('a dead COM connection is SESSION_LOST (by HRESULT), and `exists` does not turn it into "false"', async () => {
+    const transport = await attached();
+    const dead = (await transport.request({ op: 'get', id: 'wnd[0]/usr/txtDEAD', prop: 'text' }).catch((e: unknown) => e)) as SapGuiTransportError;
+    expect(dead.code).toBe('SESSION_LOST');
+    const exists = (await transport.request({ op: 'exists', id: 'wnd[0]/usr/txtDEAD' }).catch((e: unknown) => e)) as SapGuiTransportError;
+    expect(exists).toBeInstanceOf(SapGuiTransportError); // used to be `false`: a dead session looked like a missing control
+    expect(exists.code).toBe('SESSION_LOST');
+    expect(await transport.request({ op: 'ping' })).toBe('pong');
+    await transport.close();
+  });
+
+  test('`progress` reports the round-trip counter, the screen and the window count', async () => {
+    const transport = await attached();
+    expect(await transport.request({ op: 'progress' })).toEqual({ roundTrips: 3, transaction: '', program: 'SAPMSYST', screen: '0100', title: 'Stub SAP', windows: 1 });
     await transport.close();
   });
 

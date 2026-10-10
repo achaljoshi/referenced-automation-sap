@@ -1,9 +1,8 @@
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { test as uiTest } from '@automation/referenced-automation-ui';
 import { getLogger, loadEnv } from '@automation/referenced-automation-utils';
-import { appendCreated, DEFAULT_DATA_DIR, formatCreated, SapDataRegistry } from './data';
+import { appendCreated, DEFAULT_DATA_DIR, formatCreated, SapDataRegistry, type CreatedObject } from './data';
 import { createSampleSapSystem } from './fakeSapGui';
 import { startRealTransport } from './transportFactory';
 import { appendInsight, DEFAULT_INSIGHTS_DIR } from '../insights';
@@ -27,6 +26,20 @@ export interface SapGuiOptions {
    * 'test': a fresh connection per test - slower, and only for flows that must start from the logon screen.
    */
   sapGuiReuse: 'worker' | 'test' | undefined;
+  /**
+   * What happens when a test's cleanup of the SAP data it created fails (or was never registered):
+   *  - 'fail' (default): the test fails after its cleanup, naming each orphan - a leftover order in a shared system is a defect, not a log line
+   *  - 'warn': recorded as a test annotation and in the audit list only
+   * (SAP_GUI_CLEANUP_FAILURE=warn)
+   */
+  sapCleanupFailure: 'fail' | 'warn' | undefined;
+  /**
+   * What happens when the session cannot be returned to the start screen before a test (`home()` failed):
+   *  - 'fail' (default): the test fails - it would otherwise start on whatever screen the previous test left behind
+   *  - 'warn': log it and run the test anyway
+   * (SAP_GUI_HOME_FAILURE=warn)
+   */
+  sapHomeFailure: 'fail' | 'warn' | undefined;
 }
 
 const log = getLogger('sap-gui');
@@ -44,6 +57,28 @@ export class SapConnection {
 
   private get env() {
     return loadEnv();
+  }
+
+  /** How the session is obtained: the option, else SAP_GUI_MODE (default attach). The simulator always behaves like 'attach' to a private fake. */
+  get mode(): 'attach' | 'open' {
+    return (
+      this.options.sapGuiMode ?? (this.env.get('SAP_GUI_MODE', 'attach') as 'attach' | 'open')
+    );
+  }
+
+  /**
+   * Attach mode drives THE session someone already has open: every worker would attach to the same SAP window and
+   * interleave keystrokes in it. Refuse that instead of producing tests that fail (or worse, pass) at random. Not an
+   * issue for the simulator or a custom transport (each worker has its own), nor for mode=open (a connection per worker).
+   */
+  assertSessionNotShared(workers: number): void {
+    if (workers > 1 && this.mode === 'attach' && !this.simulated && !this.options.sapGuiTransport) {
+      throw new Error(
+        `SAP_GUI_MODE=attach with ${workers} workers: every worker would drive the same SAP GUI window. ` +
+          'Run with --workers=1 (this repo\'s playwright.config.ts does that by default - was WORKERS or --workers set?), ' +
+          'or use SAP_GUI_MODE=open with SAP_USER_POOL so each worker gets its own connection and user.',
+      );
+    }
   }
 
   get simulated(): boolean {
@@ -105,11 +140,10 @@ export class SapConnection {
     const simulate = this.simulated;
     const timeoutMs = env.getInt('SAP_GUI_TIMEOUT_MS', 30_000);
     const evidence = this.evidence === 'steps' ? 'steps' : 'off';
+    const roundTripWaitMs = env.getInt('SAP_GUI_ROUNDTRIP_WAIT_MS', 250);
     const fallbacks = env.get('SAP_GUI_FALLBACKS', 'report') as 'report' | 'fail' | 'off';
     // The simulator always starts at the logon screen, like mode=open does on a real system.
-    const mode = simulate
-      ? 'attach'
-      : this.options.sapGuiMode ?? (env.get('SAP_GUI_MODE', 'attach') as 'attach' | 'open');
+    const mode = simulate ? 'attach' : this.mode;
 
     // Lease a user BEFORE starting the bridge: a pool timeout must not leave a PowerShell process behind.
     const poolUsers = env.getList('SAP_USER_POOL');
@@ -140,7 +174,7 @@ export class SapConnection {
             })
           : undefined) ??
         (await startRealTransport()).transport;
-      const session = await this.openSession(mode, transport, env, timeoutMs, evidence, fallbacks);
+      const session = await this.openSession(mode, transport, env, timeoutMs, evidence, fallbacks, roundTripWaitMs);
       if (this.lease) session.assignedUser = this.lease.user;
       return session;
     } catch (error) {
@@ -158,21 +192,19 @@ export class SapConnection {
     timeoutMs: number,
     evidence: 'off' | 'steps',
     fallbacks: 'report' | 'fail' | 'off' = 'report',
+    roundTripWaitMs = 250,
   ): Promise<SapGuiSession> {
+    const common = { timeoutMs, evidence, fallbacks, roundTripWaitMs, evidenceDir: env.getOptional('SAP_GUI_EVIDENCE_DIR') };
     if (mode === 'open') {
       this.opened = true;
       return SapGuiSession.open(transport, env.getOptional('SAP_GUI_CONNECTION_NAME') ?? '', {
-        timeoutMs,
-        evidence,
-        fallbacks,
+        ...common,
         logonPath: env.get('SAP_GUI_LOGON_PATH', DEFAULT_LOGON_PATH),
         connectionString: env.getOptional('SAP_GUI_CONNECTION_STRING'),
       });
     }
     return SapGuiSession.attach(transport, {
-      timeoutMs,
-      evidence,
-      fallbacks,
+      ...common,
       connectionIndex: env.getInt('SAP_GUI_CONNECTION_INDEX', 0),
       sessionIndex: env.getInt('SAP_GUI_SESSION_INDEX', 0),
     });
@@ -215,6 +247,8 @@ export const sapGuiTest = uiTest.extend<
   sapGuiMode: [undefined, { option: true, scope: 'worker' }],
   sapGuiTransport: [undefined, { option: true, scope: 'worker' }],
   sapGuiReuse: [undefined, { option: true, scope: 'worker' }],
+  sapCleanupFailure: [undefined, { option: true, scope: 'worker' }],
+  sapHomeFailure: [undefined, { option: true, scope: 'worker' }],
 
   sapConnection: [
     async ({ sapGuiMode, sapGuiTransport, sapGuiReuse }, use) => {
@@ -225,20 +259,17 @@ export const sapGuiTest = uiTest.extend<
     { scope: 'worker' },
   ],
 
-  sap: async ({ sapConnection }, use, testInfo) => {
+  sap: async ({ sapConnection, sapHomeFailure }, use, testInfo) => {
     testInfo.skip(
       !sapConnection.canRun,
       'SAP GUI Scripting needs Windows with SAP GUI installed - this test was skipped, not run. (Set SAP_GUI_SIMULATOR=true to run against the built-in fake SAP.)',
     );
+    sapConnection.assertSessionNotShared(testInfo.config.workers);
 
     const session = await sapConnection.acquire();
     session.resetDiagnostics();
     if (sapConnection.reuse === 'worker')
-      await session
-        .home()
-        .catch((error: unknown) =>
-          log.warn(`[sap-gui] could not return to the start screen: ${String(error)}`),
-        );
+      await startFromHome(session, sapHomeFailure ?? loadEnv().get('SAP_GUI_HOME_FAILURE', 'fail'), () => sapConnection.dispose());
 
     try {
       await use(session);
@@ -264,8 +295,10 @@ export const sapGuiTest = uiTest.extend<
    * `captureFromStatusBar(...)`) with a cleanup, and it is undone after the test - pass or fail,
    * and after every retry. SAP_GUI_CLEANUP=off leaves everything (the audit list is still written).
    */
-  sapData: async ({ sap }, use, testInfo) => {
-    const registry = new SapDataRegistry(sap, testInfo.titlePath.slice(1).join(' > '));
+  sapData: async ({ sap, sapCleanupFailure }, use, testInfo) => {
+    const registry = new SapDataRegistry(sap, testInfo.titlePath.slice(1).join(' > '), {
+      cleanupTimeoutMs: loadEnv().getInt('SAP_GUI_CLEANUP_TIMEOUT_MS', 60_000),
+    });
     await use(registry);
     if (registry.items.length === 0) return;
     if (loadEnv().get('SAP_GUI_CLEANUP', 'on') !== 'off') {
@@ -281,8 +314,49 @@ export const sapGuiTest = uiTest.extend<
     } catch (error) {
       log.warn(`[sap-gui] could not write the created-data audit list: ${String(error)}`);
     }
+    surfaceCleanupFailures(registry.items, testInfo, sapCleanupFailure ?? loadEnv().get('SAP_GUI_CLEANUP_FAILURE', 'fail'));
   },
 });
+
+/**
+ * Logged-only cleanup failures are how orphan orders pile up in a shared system: every failed cleanup becomes a test annotation
+ * and, unless `mode` is 'warn', fails the test with the list of what is still in SAP.
+ */
+export function surfaceCleanupFailures(
+  items: readonly CreatedObject[],
+  testInfo: { annotations: Array<{ type: string; description?: string }> },
+  mode: string,
+): void {
+  const failed = items.filter((o) => o.status === 'cleanup-failed');
+  for (const o of failed)
+    testInfo.annotations.push({ type: 'sap-cleanup-failed', description: `${o.type} ${o.id}: ${o.note ?? 'cleanup failed'}` });
+  if (failed.length > 0 && mode !== 'warn') {
+    throw new Error(
+      `${failed.length} SAP object(s) created by this test could not be cleaned up and are still in SAP:\n` +
+        failed.map((o) => `  ${o.type} ${o.id}: ${o.note ?? 'cleanup failed'}`).join('\n') +
+        '\n(SAP_GUI_CLEANUP_FAILURE=warn only records them; `sap-gui-data orphans` lists them afterwards)',
+    );
+  }
+}
+
+/**
+ * Brings a reused session back to the start screen before a test. When that fails the test would start on whatever the previous
+ * one left behind, so by default it fails (`mode` 'fail'); 'warn' logs it and runs the test anyway. `onFail` runs first on failure
+ * (the fixture drops the connection so the next test gets a fresh one).
+ */
+export async function startFromHome(session: SapGuiSession, mode: string, onFail: () => Promise<void> = async () => undefined): Promise<void> {
+  try {
+    await session.home();
+  } catch (error) {
+    const message = `could not return to the start screen before the test: ${error instanceof Error ? error.message : String(error)}`;
+    if (mode === 'warn') {
+      log.warn(`[sap-gui] ${message}`);
+      return;
+    }
+    await onFail().catch(() => undefined);
+    throw new Error(`${message} (SAP_GUI_HOME_FAILURE=warn runs the test anyway)`);
+  }
+}
 
 /** Appends this test's SAP activity to the insights file. Never throws. */
 function recordInsight(
@@ -349,6 +423,7 @@ export async function attachDiagnostics(
         .attach(`sap-evidence: ${item.label}`, { path: item.file, contentType: 'image/png' })
         .catch(() => undefined);
   }
+  session.discardEvidenceFiles(); // the report holds its own copy now
   if (session.driftItems.length > 0) {
     const body = session.driftItems
       .map(
@@ -389,10 +464,14 @@ export async function attachDiagnostics(
     );
   }
   try {
-    const file = path.join(os.tmpdir(), `sap-failure-${Date.now()}.png`);
-    await session.screenshot(file);
-    if (fs.existsSync(file))
-      await testInfo.attach('sap-screenshot', { path: file, contentType: 'image/png' });
+    const file = path.join(session.screenshotDir(), `sap-failure-${process.pid}-${Date.now()}.png`);
+    try {
+      await session.screenshot(file);
+      if (fs.existsSync(file))
+        await testInfo.attach('sap-screenshot', { path: file, contentType: 'image/png' });
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
   } catch (error) {
     log.warn(
       `could not capture a SAP screenshot after failure: ${error instanceof Error ? error.message : String(error)}`,

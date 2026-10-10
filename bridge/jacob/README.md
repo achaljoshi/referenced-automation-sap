@@ -45,3 +45,8 @@ Verified (in this repository's tests): the helper compiles for Java 8, and when 
 ## What it deliberately does not do
 
 It does not kill processes (the existing framework's `wmic ... terminate`), sleep, or store credentials. Starting SAP Logon happens only if SAP Logon is not already running and `SAP_GUI_LOGON_PATH` points at it.
+
+## Error codes
+
+The helper answers a failure with a code the framework acts on: `NOT_FOUND` when `FindById` itself fails on a live connection (whatever language SAP GUI words the message in - the English text is only a last-resort fallback), `SESSION_LOST` when the COM connection is dead (an RPC / "disconnected" HRESULT read with `ComFailException.getHResult()`; `exists` and the optional property reads do not turn it into `false` / `null`), and `ERROR` for everything else. The classification runs against the stand-in JACOB classes in the framework's tests, whose `ComFailException` is a test double: that the real JACOB library reports these HRESULTs this way is **not verified**.
+

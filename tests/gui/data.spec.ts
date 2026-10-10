@@ -90,7 +90,78 @@ test.describe('cleanup', () => {
   });
 });
 
+test.describe('SAP-05: cleanups run one at a time on the session', () => {
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  test('a cleanup that times out is signalled and AWAITED: the next cleanup never starts while it is still running', async () => {
+    const sap = await savedOrder();
+    const registry = new SapDataRegistry(sap, 't', { cleanupTimeoutMs: 60, cleanupGraceMs: 2_000 });
+    const timeline: string[] = [];
+    let slowSignalAborted = false;
+    // newest first: "slow" runs first, then "fast"
+    registry.record('Fast', 'F1', { cleanup: async () => void timeline.push('fast:start', 'fast:end') });
+    registry.record('Slow', 'S1', {
+      cleanup: async (_sap, { signal }) => {
+        timeline.push('slow:start');
+        await sleep(250); // outlives its 60 ms limit, does not look at the signal until it is done
+        slowSignalAborted = signal.aborted;
+        timeline.push('slow:end');
+      },
+    });
+    const result = await registry.cleanup();
+    expect(timeline).toEqual(['slow:start', 'slow:end', 'fast:start', 'fast:end']); // old code: slow:start, fast:start, fast:end, slow:end
+    expect(slowSignalAborted).toBe(true);
+    expect(result.map((o) => `${o.id}:${o.status}`)).toEqual(['F1:cleaned', 'S1:cleanup-failed']);
+    expect(result.find((o) => o.id === 'S1')?.note).toContain('took longer than 60ms');
+  });
+
+  test('a cleanup that will not stop even when asked blocks the rest: they are marked failed, not run concurrently', async () => {
+    const sap = await savedOrder();
+    const registry = new SapDataRegistry(sap, 't', { cleanupTimeoutMs: 40, cleanupGraceMs: 80 });
+    let fastRan = false;
+    registry.record('Fast', 'F1', { cleanup: async () => void (fastRan = true) });
+    registry.record('Stuck', 'S1', { cleanup: () => new Promise<void>(() => undefined) });
+    const result = await registry.cleanup();
+    expect(fastRan).toBe(false);
+    const fast = result.find((o) => o.id === 'F1');
+    expect(fast?.status).toBe('cleanup-failed');
+    expect(fast?.note).toContain('not attempted');
+    expect(fast?.note).toContain('Stuck S1');
+    expect(result.find((o) => o.id === 'S1')?.note).toContain('did not stop within 80ms');
+  });
+
+  test('a cleanup that throws is simply a failure; the next one still runs', async () => {
+    const sap = await savedOrder();
+    const registry = new SapDataRegistry(sap, 't');
+    registry.record('A', 'A1', { cleanup: async () => undefined });
+    registry.record('B', 'B1', { cleanup: async () => Promise.reject(new Error('boom')) });
+    expect((await registry.cleanup()).map((o) => `${o.id}:${o.status}`)).toEqual(['A1:cleaned', 'B1:cleanup-failed']);
+  });
+});
+
 test.describe('unique values', () => {
+  test('carry the worker index and a random part, so two workers (or two runs) cannot collide', async () => {
+    const sap = await savedOrder();
+    const registry = new SapDataRegistry(sap, 't');
+    const saved = { worker: process.env.TEST_WORKER_INDEX, random: Math.random };
+    try {
+      process.env.TEST_WORKER_INDEX = '7';
+      Math.random = () => 0;
+      const a = registry.unique('X', 12); // 'X' + 11 characters: time(5) counter(2) worker(1) random(3)
+      process.env.TEST_WORKER_INDEX = '9';
+      Math.random = () => 0.5;
+      const b = registry.unique('X', 12);
+      expect(a[8]).toBe('7');
+      expect(b[8]).toBe('9');
+      expect(a.slice(-3)).toBe('000');
+      expect(b.slice(-3)).not.toBe('000');
+    } finally {
+      if (saved.worker === undefined) delete process.env.TEST_WORKER_INDEX;
+      else process.env.TEST_WORKER_INDEX = saved.worker;
+      Math.random = saved.random;
+    }
+  });
+
   test('differ every time, keep the prefix and respect the length', async () => {
     const sap = await savedOrder();
     const registry = new SapDataRegistry(sap, 't');
@@ -103,6 +174,41 @@ test.describe('unique values', () => {
   test('refuses when there is not enough room to be unique', async () => {
     const sap = await savedOrder();
     expect(() => new SapDataRegistry(sap, 't').unique('CUSTOMER', 10)).toThrow(/too few to avoid collisions/);
+  });
+});
+
+test.describe('SAP-05: `sap-gui-data` as a gate', () => {
+  const run = (...args: string[]) => spawnSync('node', [cli, ...args], { encoding: 'utf8' });
+  const entry = (status: string, id: string) => JSON.stringify({ type: 'SalesOrder', id, test: 't', at: 'now', status });
+
+  test('`list --fail-on-orphans` exits 1 while something is left, 0 when everything was cleaned', () => {
+    const bad = tmp();
+    fs.writeFileSync(path.join(bad, 'created-1.jsonl'), `${entry('cleaned', '1')}\n${entry('cleanup-failed', '2')}\n`);
+    const failing = run('list', '--dir', bad, '--fail-on-orphans');
+    expect(failing.status).toBe(1);
+    expect(failing.stderr).toContain('1 object(s) need cleaning by hand');
+    expect(run('list', '--dir', bad).status).toBe(0); // plain `list` only reports
+
+    const good = tmp();
+    fs.writeFileSync(path.join(good, 'created-1.jsonl'), `${entry('cleaned', '1')}\n`);
+    expect(run('list', '--dir', good, '--fail-on-orphans').status).toBe(0);
+  });
+
+  test('--require-data: no data directory is exit 2 (the SAP tests did not run), not a pass', () => {
+    const missing = path.join(tmp(), 'nothing-here');
+    expect(run('orphans', '--dir', missing).status).toBe(0); // legacy: nothing recorded, nothing to clean
+    const required = run('orphans', '--dir', missing, '--require-data');
+    expect(required.status).toBe(2);
+    expect(required.stderr).toContain('did the SAP tests run');
+  });
+
+  test('a damaged list is exit 2 with a message, never a stack trace and never a quiet pass', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'created-1.jsonl'), `${entry('cleanup-failed', '1')}\n{"type":"SalesOrd\n`);
+    const result = run('orphans', '--dir', dir);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('created-1.jsonl line 2 is not valid JSON');
+    expect(result.stderr).not.toContain('at JSON.parse');
   });
 });
 

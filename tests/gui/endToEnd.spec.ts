@@ -50,6 +50,9 @@ test.describe('a recording, converted, runs to completion', () => {
       sourceName: 'examples/va01_create_order.vbs',
       testImport: './sapFakeTest',
       tag: '@sapgui-sample',
+      // the recording only performs actions; the committed example asserts the outcome so that it can fail
+      expectStatus: 'has been saved',
+      expectImport: '../../src',
     }).code;
     expect(fs.readFileSync(path.join(root, 'tests/gui/va01_create_order.spec.ts'), 'utf8')).toBe(regenerated);
   });

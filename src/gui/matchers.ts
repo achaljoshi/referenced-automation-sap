@@ -47,6 +47,11 @@ async function until(
   return last;
 }
 
+function isCi(): boolean {
+  const ci = process.env.CI;
+  return ci !== undefined && ci !== '' && !/^(0|false)$/i.test(ci);
+}
+
 function matches(actual: string, expected: string | RegExp, mode: 'equal' | 'contain'): boolean {
   if (typeof expected !== 'string') return expected.test(actual);
   return mode === 'equal'
@@ -183,6 +188,54 @@ export const expect = baseExpect.extend({
     );
   },
 
+  /**
+   * The last action ended without an error message: after waiting (bounded) for evidence that SAP has answered - a status bar
+   * message of type S, I or W, or the screen / title / round-trip counter having moved since the last action - the status bar is
+   * not an error (type E) or abort (type A). An error that appears is reported at once. If nothing at all is observed within
+   * the timeout this FAILS: a status bar that is still empty on the old screen proves nothing about the action.
+   * `requireOutcome: false` checks the status bar as it is right now (types E and A only).
+   * Not usable with `.not`.
+   */
+  async toHaveNoStatusError(
+    this: ExpectMatcherState,
+    sap: SapGuiSession,
+    options: SapAssertionOptions & { requireOutcome?: boolean } = {},
+  ) {
+    if (this.isNot)
+      throw new Error('toHaveNoStatusError cannot be negated - to expect an error use toHaveStatusMessage(/.../, { type: "E" })');
+    const requireOutcome = options.requireOutcome ?? true;
+    const deadline = Date.now() + (options.timeout ?? DEFAULT_TIMEOUT_MS);
+    let actual = '(nothing observed yet)';
+    let ok = false;
+    for (;;) {
+      const bar = await sap.statusBar();
+      actual = `${bar.type ? `[${bar.type}] ` : ''}${bar.text || '(empty status bar)'}`;
+      if (bar.type === 'E' || bar.type === 'A') break; // an error: no need to wait
+      const outcome =
+        (bar.text !== '' && ['S', 'I', 'W'].includes(bar.type)) ||
+        (await sap.screenMovedSinceLastAction());
+      if (outcome || !requireOutcome) {
+        ok = true;
+        break;
+      }
+      if (Date.now() >= deadline) {
+        actual += ' - and the screen did not change: nothing shows that SAP has answered the last action yet';
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    }
+    return {
+      name: 'toHaveNoStatusError',
+      pass: ok,
+      expected: 'no error or abort message, after SAP has answered',
+      actual,
+      message: () =>
+        `${this.utils.matcherHint('toHaveNoStatusError', 'sap', '', { isNot: false })}\n\n` +
+        `Expected: no error (E) or abort (A) status message, once SAP has answered the last action\n` +
+        `Received: ${this.utils.printReceived(actual)}`,
+    };
+  },
+
   async toHaveTitle(
     this: ExpectMatcherState,
     sap: SapGuiSession,
@@ -211,6 +264,16 @@ export const expect = baseExpect.extend({
     const dir = options.dir ?? process.env.SAP_GUI_CONTRACTS_DIR ?? DEFAULT_CONTRACTS_DIR;
     const current = await captureContract(sap, name, options);
     const update = options.update ?? process.env.SAP_GUI_UPDATE_CONTRACTS === 'true';
+    if (update && isCi()) {
+      // Updating writes the baseline from whatever screen SAP shows: in CI that would "fix" a drift by accepting it,
+      // and the changed file would be thrown away with the runner anyway. Baselines are captured on a workstation, reviewed and committed.
+      return {
+        name: 'toMatchScreenContract',
+        pass: false,
+        message: () =>
+          `Refusing to update the screen contract "${name}" in CI (CI is set): SAP_GUI_UPDATE_CONTRACTS / update:true would accept the current screen as the new baseline. Update it on a workstation, review the diff and commit it.`,
+      };
+    }
     const baseline = loadContract(dir, name);
 
     if (update || !baseline) {

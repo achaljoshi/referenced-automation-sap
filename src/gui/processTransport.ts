@@ -17,6 +17,8 @@ export interface ProcessTransportOptions {
   requestTimeoutMs?: number;
   /** How long to wait for the bridge to say it is ready. Default 30 s. */
   startupTimeoutMs?: number;
+  /** How long close() waits for the bridge to answer `quit` and exit before killing it. Default 2 s. */
+  quitTimeoutMs?: number;
 }
 
 interface Pending {
@@ -35,12 +37,19 @@ interface Pending {
  * The bridge first sends {"rid": 0, "ok": true} to say it is ready. Any program that follows this
  * protocol can be a bridge - the PowerShell script and the Java/JACOB helper both do, which is what
  * lets a restricted machine swap one for the other without touching a test.
+ *
+ * A bridge that stops answering is not waited for again: after a request times out, the pipe breaks (EPIPE) or the
+ * process exits, the bridge is killed, every pending request is rejected at once and every later one fails immediately -
+ * a hung PowerShell must cost one timeout, not one per remaining call.
  */
 export class ProcessTransport implements SapGuiTransport {
   private readonly log = getLogger('sap-gui-bridge');
   private readonly pending = new Map<number, Pending>();
   private nextRid = 1;
   private exited = false;
+  private cleanedUp = false;
+  /** Why the bridge was stopped, once it has been (a timeout, a broken pipe): the message of every later request. */
+  private stopped?: SapGuiTransportError;
   private stderrTail = '';
 
   private constructor(
@@ -64,6 +73,16 @@ export class ProcessTransport implements SapGuiTransport {
         ),
       );
     });
+    // A bridge that closed its end of the pipe (crashed, was killed) makes the next write emit 'error' (EPIPE);
+    // without a listener that is an uncaught exception that takes the whole test worker down.
+    child.stdin.on('error', (error) =>
+      this.stop(
+        new SapGuiTransportError(
+          `the ${options.label} bridge closed its input (${error.message}) - it has stopped`,
+          'BRIDGE_EXITED',
+        ),
+      ),
+    );
   }
 
   static async start(options: ProcessTransportOptions): Promise<ProcessTransport> {
@@ -96,9 +115,15 @@ export class ProcessTransport implements SapGuiTransport {
           reject(error);
         },
       });
-    }).catch(async (error) => {
-      await transport?.close().catch(() => undefined);
-      options.cleanup?.();
+    }).catch((error) => {
+      // Never `close()` here: that sends `quit` and waits for an answer from a bridge that just failed to start.
+      if (transport) {
+        transport.stop(error instanceof SapGuiTransportError ? error : undefined);
+        transport.runCleanup();
+      } else {
+        child.kill();
+        options.cleanup?.();
+      }
       throw error;
     });
     return transport;
@@ -127,7 +152,7 @@ export class ProcessTransport implements SapGuiTransport {
       pending.reject(
         new SapGuiTransportError(
           message.error ?? 'unknown bridge error',
-          message.code === 'NOT_FOUND' ? 'NOT_FOUND' : 'ERROR',
+          message.code === 'NOT_FOUND' || message.code === 'SESSION_LOST' ? message.code : 'ERROR',
         ),
       );
   }
@@ -135,8 +160,12 @@ export class ProcessTransport implements SapGuiTransport {
   private onExit(code: number | null, ready: { reject: (error: Error) => void }): void {
     this.exited = true;
     const detail = `${this.options.label} bridge exited (code ${code})${this.stderrTail ? `: ${this.stderrTail.trim()}` : ''}`;
-    const error = new SapGuiTransportError(detail, 'BRIDGE_EXITED');
+    const error = this.stopped ?? new SapGuiTransportError(detail, 'BRIDGE_EXITED');
     ready.reject(error);
+    this.rejectAll(error);
+  }
+
+  private rejectAll(error: Error): void {
     for (const [rid, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(error);
@@ -144,46 +173,102 @@ export class ProcessTransport implements SapGuiTransport {
     }
   }
 
+  /**
+   * Gives up on the bridge: kills it, fails everything that is waiting for it and makes every later request fail at once.
+   * `reason` is what they are told; the first reason wins.
+   */
+  private stop(reason?: SapGuiTransportError): void {
+    if (!this.stopped) {
+      this.stopped =
+        reason ??
+        new SapGuiTransportError(
+          `the ${this.options.label} bridge was stopped`,
+          'BRIDGE_EXITED',
+        );
+    }
+    this.exited = true;
+    this.rejectAll(this.stopped);
+    this.child.kill();
+  }
+
+  private runCleanup(): void {
+    if (this.cleanedUp) return;
+    this.cleanedUp = true;
+    this.options.cleanup?.();
+  }
+
   request(command: SapGuiCommand): Promise<unknown> {
+    return this.send(command, this.options.requestTimeoutMs ?? 60_000);
+  }
+
+  private send(command: SapGuiCommand, timeoutMs: number): Promise<unknown> {
     if (this.exited)
       return Promise.reject(
-        new SapGuiTransportError(
-          `the ${this.options.label} bridge is not running`,
-          'BRIDGE_EXITED',
-        ),
+        this.stopped ??
+          new SapGuiTransportError(
+            `the ${this.options.label} bridge is not running`,
+            'BRIDGE_EXITED',
+          ),
       );
-    const requestTimeoutMs = this.options.requestTimeoutMs ?? 60_000;
     const rid = this.nextRid++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        // A bridge that did not answer is hung (typically SAP GUI is showing a dialog that blocks scripting). Waiting the
+        // full timeout again for every later call would turn one failure into minutes: stop it, fail them all now.
+        const error = new SapGuiTransportError(
+          `no reply to "${command.op}" within ${timeoutMs}ms - SAP GUI may be showing a dialog that blocks scripting; the ${this.options.label} bridge was stopped`,
+          'TIMEOUT',
+        );
         this.pending.delete(rid);
-        reject(
+        reject(error);
+        this.stop(
           new SapGuiTransportError(
-            `no reply to "${command.op}" within ${requestTimeoutMs}ms - SAP GUI may be showing a dialog that blocks scripting`,
-            'TIMEOUT',
+            `the ${this.options.label} bridge was stopped after "${command.op}" got no reply within ${timeoutMs}ms`,
+            'BRIDGE_EXITED',
           ),
         );
-      }, requestTimeoutMs);
+      }, timeoutMs);
       this.pending.set(rid, { resolve, reject, timer, command: command.op });
-      this.child.stdin.write(`${JSON.stringify({ rid, ...command })}\n`);
+      try {
+        this.child.stdin.write(`${JSON.stringify({ rid, ...command })}\n`, (error) => {
+          if (error)
+            this.stop(
+              new SapGuiTransportError(
+                `could not send "${command.op}" to the ${this.options.label} bridge: ${error.message}`,
+                'BRIDGE_EXITED',
+              ),
+            );
+        });
+      } catch (error) {
+        this.stop(
+          new SapGuiTransportError(
+            `could not send "${command.op}" to the ${this.options.label} bridge: ${error instanceof Error ? error.message : String(error)}`,
+            'BRIDGE_EXITED',
+          ),
+        );
+      }
     });
   }
 
   async close(): Promise<void> {
     if (!this.exited) {
-      await this.request({ op: 'quit' }).catch(() => undefined);
-      this.child.stdin.end();
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => {
-          this.child.kill();
-          resolve();
-        }, 3_000);
-        this.child.once('exit', () => {
-          clearTimeout(timer);
-          resolve();
+      // `quit` gets a short deadline of its own (a timeout kills the bridge); the request timeout is for real work.
+      const quitMs = this.options.quitTimeoutMs ?? 2_000;
+      await this.send({ op: 'quit' }, quitMs).catch(() => undefined);
+      if (!this.exited) {
+        this.child.stdin.end();
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            this.child.kill();
+            resolve();
+          }, quitMs);
+          this.child.once('exit', () => {
+            clearTimeout(timer);
+            resolve();
+          });
         });
-      });
+      }
     }
-    this.options.cleanup?.();
+    this.runCleanup();
   }
 }

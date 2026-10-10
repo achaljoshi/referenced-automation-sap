@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { placeholders } from '@automation/referenced-automation-utils';
-import { createSampleSapSystem, registerSapSteps, SapGuiSession } from '../../src';
+import { createSampleSapSystem, FakeSapGui, registerSapSteps, SapGuiSession } from '../../src';
 import { FAST } from './support';
 
 type Implementation = (fixtures: any, ...parameters: any[]) => unknown;
@@ -60,6 +60,7 @@ test.describe('the reusable SAP steps', () => {
         'the field labelled {string} contains {string}',
         'the screen title contains {string}',
         'the status bar does not show an error',
+        'the status bar does not show an error right now',
         'the status bar shows a success message containing {string}',
         'the status bar shows {string}',
       ].sort(),
@@ -236,5 +237,72 @@ test.describe('the reusable SAP steps', () => {
     await expect(run('I am logged on to SAP', { sap, sapScenario: new Map() })).rejects.toThrow(
       /SAP_USER and SAP_PASSWORD must both be set/,
     );
+  });
+});
+
+test.describe('ORC-03: "the status bar does not show an error" proves something', () => {
+  /** Two screens: Save goes to a screen whose status bar says `type`/`text` - only after the server's answer arrives (responseLagMs). */
+  const lagging = (type: string | undefined, text: string | undefined, lag = 150) =>
+    new FakeSapGui({
+      start: 'a',
+      transitionDelayMs: 0,
+      responseLagMs: lag,
+      screens: [
+        {
+          name: 'a',
+          context: { transaction: 'ZA', program: 'PA', screen: '0100' },
+          elements: { 'wnd[0]': { type: 'GuiMainWindow', props: { text: 'A' } }, 'wnd[0]/tbar[0]/btn[11]': { type: 'GuiButton', props: { tooltip: 'Save' } }, 'wnd[0]/sbar': { type: 'GuiStatusbar' } },
+          onPress: { 'wnd[0]/tbar[0]/btn[11]': () => 'b' },
+        },
+        {
+          name: 'b',
+          context: { transaction: 'ZA', program: 'PB', screen: '0200' },
+          status: text,
+          elements: { 'wnd[0]': { type: 'GuiMainWindow', props: { text: 'B' } }, 'wnd[0]/sbar': { type: 'GuiStatusbar', props: type ? { messageType: type } : {} } },
+        },
+      ],
+    });
+  // roundTripWaitMs: 0 = the old idle logic, so the step really does run before SAP has answered (the situation the assertion must survive)
+  const setup = async (fake: FakeSapGui) => ({ sap: await SapGuiSession.attach(fake, { ...FAST, roundTripWaitMs: 0 }), vars: new placeholders.ScenarioVariables(), sapScenario: new Map<string, string>() });
+  const check = (fixtures: object) => registry().run('the status bar does not show an error', fixtures);
+
+  test('an error that arrives after the screen has not settled yet is caught (the old `not.toHaveStatusMessage` passed on the empty status bar)', async () => {
+    const fixtures = await setup(lagging('E', 'Customer 1000 is blocked'));
+    await fixtures.sap.press('wnd[0]/tbar[0]/btn[11]'); // returns at once: the answer is 150 ms away
+    await expect(check(fixtures)).rejects.toThrow(/\[E\] Customer 1000 is blocked/);
+  });
+
+  test('an abort message (type A) is an error too - the old check only looked at E', async () => {
+    const fixtures = await setup(lagging('A', 'Runtime error: SAPSQL_ARRAY_INSERT_DUPREC', 20));
+    await fixtures.sap.press('wnd[0]/tbar[0]/btn[11]');
+    await expect(check(fixtures)).rejects.toThrow(/\[A\] Runtime error/);
+  });
+
+  test('waits for the outcome and then passes when it is a success (S) message', async () => {
+    const fixtures = await setup(lagging('S', 'Order 4711 has been saved'));
+    await fixtures.sap.press('wnd[0]/tbar[0]/btn[11]');
+    await expect(check(fixtures)).resolves.toBeUndefined();
+  });
+
+  test('passes when the screen moved on with no message at all (an empty status bar after the answer arrived)', async () => {
+    const fixtures = await setup(lagging(undefined, undefined, 60));
+    await fixtures.sap.press('wnd[0]/tbar[0]/btn[11]');
+    await expect(check(fixtures)).resolves.toBeUndefined();
+  });
+
+  test('FAILS when nothing at all is observed: an empty status bar on an unchanged screen proves nothing', async () => {
+    const fake = lagging('S', 'unused', 60);
+    const fixtures = await setup(fake);
+    const start = Date.now();
+    await expect(registry().run('the status bar does not show an error', fixtures)).rejects.toThrow(/nothing shows that SAP has answered/);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(4_000); // it kept looking for the whole (default 5 s) window
+  });
+
+  test('"... right now" is the old instant check (still catching E and A) for the cases that truly have nothing to wait for', async () => {
+    const fixtures = await setup(lagging('E', 'Customer 1000 is blocked', 0));
+    await fixtures.sap.press('wnd[0]/tbar[0]/btn[11]');
+    await expect(registry().run('the status bar does not show an error right now', fixtures)).rejects.toThrow(/\[E\]/);
+    const quiet = await setup(lagging('S', 'unused', 60));
+    await expect(registry().run('the status bar does not show an error right now', quiet)).resolves.toBeUndefined();
   });
 });

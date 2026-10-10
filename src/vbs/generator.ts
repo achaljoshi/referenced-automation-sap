@@ -1,6 +1,7 @@
 import { identifier, quote } from './names';
 import { Objects } from './objects';
 import { parseVbs, type Expr, type ParseWarning, type Step } from './parser';
+import { protectSecrets, secretEnvVarForId } from './secrets';
 
 export { identifier, quote } from './names';
 
@@ -25,7 +26,56 @@ export const DEFAULT_PARAM_RULES: ParamRule[] = [
   { idPattern: /txtRSYST-LANGU$/i, envVar: 'SAP_LANGUAGE' },
 ];
 
+/**
+ * The rule for a control id: the first matching rule, else - for a field whose name is a secret (password, PIN, OTP, token ...)
+ * even if no rule says so - a synthetic secret rule. A secret field never gets its recorded value written out.
+ */
+export function ruleFor(id: string, rules: ParamRule[]): ParamRule | undefined {
+  const rule = rules.find((r) => r.idPattern.test(id));
+  if (rule) return rule;
+  const envVar = secretEnvVarForId(id);
+  return envVar ? { idPattern: /^/, envVar, secret: true } : undefined;
+}
+
+/** The properties through which a typed value reaches a field. */
+export const VALUE_PROPS = new Set(['text', 'value', 'key']);
+
+/** What a converted recording is missing and a human must add: it only performs actions, so it passes whenever SAP does not throw. */
+export const NO_ASSERTION_TODO =
+  'TODO(converter): no assertion - this test only performs the recorded actions, so it passes whenever SAP does not throw.';
+
+/** The last lines of a generated test body: a real assertion if the caller supplied one, else the TODO and (by default) a guard that fails until it is replaced. */
+export function assertionLines(options: { expectStatus?: string; noAssertion?: 'fail' | 'todo' }): string[] {
+  if (options.expectStatus !== undefined)
+    return [`await expect(sap).toHaveStatusMessage(${statusPattern(options.expectStatus)});`];
+  return [
+    `// ${NO_ASSERTION_TODO}`,
+    '// Add a check of the business result, e.g.  await expect(sap).toHaveStatusMessage(/has been saved/i, { type: \'S\' });',
+    ...(options.noAssertion === 'todo'
+      ? []
+      : [
+          '// then delete the next line (it fails the test on purpose; the converter option --allow-no-assertion leaves it out).',
+          `throw new Error(${quote(`add an assertion: ${NO_ASSERTION_TODO}`)});`,
+        ]),
+  ];
+}
+
+function statusPattern(source: string): string {
+  new RegExp(source); // throws a clear SyntaxError for a bad pattern, at conversion time
+  return source.includes('/') ? `new RegExp(${quote(source)}, 'i')` : `/${source}/i`;
+}
+
 export interface GenerateOptions {
+  /**
+   * A regular expression the status bar must match at the end of the test: becomes the test's assertion
+   * (`expect(sap).toHaveStatusMessage(...)`). Without it the test has NO assertion: it ends with a TODO and, unless
+   * `noAssertion: 'todo'`, a guard that fails the test until a human adds one.
+   */
+  expectStatus?: string;
+  /** What to emit when there is no assertion: 'fail' (default) a guard that throws, 'todo' only the comment. */
+  noAssertion?: 'fail' | 'todo';
+  /** Module the generated spec imports `sapExpect` (the SAP assertions) from. Default: the published package. Only used with `expectStatus`. */
+  expectImport?: string;
   /** Test title. */
   testName: string;
   /** Shown in the header comment, e.g. 'recordings/va01.vbs'. */
@@ -47,6 +97,9 @@ export interface GenerateOptions {
    */
   inline?: boolean;
 }
+
+/** A conversion note: `todo` (default) needs a human decision and fails --strict; `info` only reports what the converter did (e.g. a secret replaced by an environment read). */
+export type { ParseWarning };
 
 export interface Generated {
   /** The whole spec file. */
@@ -72,13 +125,23 @@ export function renderExpr(expr: Expr): string {
       return identifier(expr.name);
     case 'concat':
       return expr.parts.map(renderExpr).join(' + ');
+    case 'env':
+      return `env.get(${quote(expr.envVar)})`;
   }
 }
 
-export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], options: GenerateOptions): Generated {
+export function generateFromSteps(recorded: Step[], parseWarnings: ParseWarning[], options: GenerateOptions): Generated {
   const rules = [...(options.params ?? []), ...DEFAULT_PARAM_RULES];
   const warnings = [...parseWarnings];
   const envVars = new Set<string>();
+  // Secrets first: a variable that carries a password (by name or because it flows into a password field) loses its literals.
+  const protectedSteps = protectSecrets(recorded, (id) => {
+    const rule = ruleFor(id, rules);
+    return rule?.secret ? rule.envVar : undefined;
+  });
+  const steps = protectedSteps.steps;
+  warnings.push(...protectedSteps.warnings.map((w) => ({ ...w, severity: 'info' as const })));
+  for (const name of protectedSteps.envVars) envVars.add(name);
   const declared = new Set<string>();
   const stripPrefix = options.stripSessionPrefix ?? true;
   const lineComments = options.lineComments ?? true;
@@ -93,21 +156,31 @@ export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], 
   const emit = (code: string, line: number) => body.push(`${code}${trace(line)}`);
 
   const textValue = (id: string, value: Expr, line: number): string => {
+    const rule = ruleFor(id, rules);
+    // a secret field: whatever literal (string, number, concatenation) the recording put there is replaced
+    if (rule?.secret && value.kind !== 'variable') {
+      envVars.add(rule.envVar);
+      warnings.push({ line, severity: 'info', message: `the recorded value for "${id}" was replaced with env ${rule.envVar} - it is not in the generated file` });
+      const read = `env.get(${quote(rule.envVar)})`;
+      return objects ? objects.fromEnv(id, read) : read;
+    }
     if (value.kind === 'string') {
-      const rule = rules.find((r) => r.idPattern.test(id));
       if (rule) {
         envVars.add(rule.envVar);
-        if (rule.secret) {
-          warnings.push({ line, message: `the recorded value for "${id}" was replaced with env ${rule.envVar} - it is not in the generated file` });
-          const read = `env.get(${quote(rule.envVar)})`;
-          return objects ? objects.fromEnv(id, read) : read;
-        }
         const read = `env.get(${quote(rule.envVar)}, ${quote(value.value)})`;
         return objects ? objects.fromEnv(id, read) : read;
       }
       if (objects && value.value !== '') return objects.input(id, value.value);
     }
-    return renderExpr(value);
+    return renderValue(value, id);
+  };
+
+  /** An expression as code; a secret read from the environment becomes a CONSTANTS getter when ids and values are collected at the top. */
+  const renderValue = (value: Expr, name: string): string => {
+    if (value.kind !== 'env') return renderExpr(value);
+    envVars.add(value.envVar);
+    const read = renderExpr(value);
+    return objects ? objects.fromEnv(name, read) : read;
   };
 
   for (const step of steps) {
@@ -124,7 +197,7 @@ export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], 
         break;
       case 'let': {
         const name = identifier(step.name);
-        emit(`${declared.has(name) ? '' : 'let '}${name} = ${renderExpr(step.value)};`, step.line);
+        emit(`${declared.has(name) ? '' : 'let '}${name} = ${renderValue(step.value, step.name)};`, step.line);
         declared.add(name);
         break;
       }
@@ -138,6 +211,8 @@ export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], 
         const id = step.id.replace(/^\/app\/con\[\d+\]\/ses\[\d+\]\//i, '');
         if (step.prop.toLowerCase() === 'text') {
           emit(`await sap.setText(${idOf(step.id)}, ${textValue(id, step.value, step.line)});`, step.line);
+        } else if (VALUE_PROPS.has(step.prop.toLowerCase()) && ruleFor(id, rules)?.secret) {
+          emit(`await sap.set(${idOf(step.id)}, ${quote(step.prop)}, ${textValue(id, step.value, step.line)});`, step.line);
         } else if (step.prop.toLowerCase() === 'selected' && step.value.kind === 'boolean') {
           emit(`await sap.setSelected(${idOf(step.id)}, ${renderExpr(step.value)});`, step.line);
         } else {
@@ -181,17 +256,23 @@ export function generateFromSteps(steps: Step[], parseWarnings: ParseWarning[], 
     ' * Review before committing:',
     ...(usesEnv ? [` *  - reads ${[...envVars].join(', ')} from the environment (.env.<name> / CI variables); none of those values is stored here`] : []),
     ' *  - no waits are needed: every step waits for SAP to be idle and for its element to exist',
+    ...(options.expectStatus === undefined
+      ? [` *  - NO ASSERTION: ${NO_ASSERTION_TODO.replace('TODO(converter): no assertion - ', '')} ${options.noAssertion === 'todo' ? 'Add one.' : 'It ends with a guard that fails until you add one.'}`]
+      : []),
     ...warnings.map((w) => ` *  - line ${w.line}: ${w.message}`),
     ' */',
   ];
+  const assertion = assertionLines(options);
   const code = [
     `import { sapGuiTest as test } from ${quote(options.testImport ?? '@automation/referenced-automation-sap')};`,
+    ...(options.expectStatus !== undefined ? [`import { sapExpect as expect } from ${quote(options.expectImport ?? '@automation/referenced-automation-sap')};`] : []),
     ...(usesEnv ? ["import { loadEnv } from '@automation/referenced-automation-utils';", '', 'const env = loadEnv();'] : []),
     '',
     ...preamble,
     ...header,
     `test(${quote(`${options.testName} ${tag}`.trim())}, async ({ sap }) => {`,
     ...body.map((line) => `  ${line}`),
+    ...assertion.map((line) => `  ${line}`),
     '});',
     '',
   ].join('\n');

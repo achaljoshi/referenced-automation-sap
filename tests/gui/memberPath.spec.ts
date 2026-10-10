@@ -31,7 +31,7 @@ test.describe('the PowerShell bridge text', () => {
   });
 
   test('handles every transport op the framework can send', () => {
-    for (const op of ['ping', 'attach', 'open', 'busy', 'exists', 'get', 'set', 'call', 'children', 'quit']) {
+    for (const op of ['ping', 'attach', 'open', 'busy', 'progress', 'exists', 'get', 'set', 'call', 'children', 'quit']) {
       expect(BRIDGE_SCRIPT).toContain(`'${op}'`);
     }
   });
@@ -48,6 +48,24 @@ test.describe('the PowerShell bridge text', () => {
     expect(attach).toBeGreaterThan(-1);
     expect(BRIDGE_SCRIPT.indexOf('Start-Process')).toBeGreaterThan(attach);
     expect(BRIDGE_SCRIPT).toMatch(/IsNullOrEmpty\(\$logonPath\)[\s\S]*throw/);
+  });
+
+  // The PowerShell bridge cannot be executed here (no Windows): these pin the SOURCE of the error classification. The same
+  // logic in the Java helper IS executed (javaBridge.spec.ts) - this only says the PowerShell text still has the pieces.
+  test('classifies errors by what failed (HRESULT / FindById), keeping the English text only as the last fallback', () => {
+    // dead-connection HRESULTs: RPC server unavailable, call failed (x2), disconnected, server died (x2), object not connected
+    for (const hresult of ['-2147023174', '-2147023170', '-2147023169', '-2147417848', '-2147418105', '-2147418094', '-2147220995']) expect(BRIDGE_SCRIPT).toContain(hresult);
+    expect(BRIDGE_SCRIPT).toContain("$code = 'SESSION_LOST'");
+    const classify = BRIDGE_SCRIPT.slice(BRIDGE_SCRIPT.indexOf("$code = 'ERROR'"));
+    expect(classify.indexOf('Test-DeadSession')).toBeLessThan(classify.indexOf('$script:notFound'));
+    expect(classify.indexOf('$script:notFound')).toBeLessThan(classify.indexOf("'could not be found'"));
+    // FindById failing (and the connection being alive) is what marks a control as not found
+    expect(BRIDGE_SCRIPT).toMatch(/function Find-Element[\s\S]*Test-DeadSession[\s\S]*\$script:notFound = \$true/);
+  });
+
+  test('a dead connection is not swallowed as "no such control" / "no such property"', () => {
+    expect(BRIDGE_SCRIPT).toMatch(/function Read-Prop[\s\S]*Test-DeadSession[\s\S]*throw/);
+    expect(BRIDGE_SCRIPT).toMatch(/'exists'[\s\S]*Test-DeadSession[\s\S]*throw/);
   });
 
   test('braces and quotes are balanced (a cheap guard against an editing slip - not a PowerShell parser)', () => {

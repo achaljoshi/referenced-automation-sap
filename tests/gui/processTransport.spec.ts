@@ -2,8 +2,11 @@ import * as path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { ProcessTransport, SapGuiSession, SapGuiTransportError } from '../../src';
 
+const processOf = (transport: ProcessTransport) => (transport as unknown as { child: import('node:child_process').ChildProcess }).child;
+const exited = (transport: ProcessTransport) => new Promise<void>((resolve) => (processOf(transport).exitCode !== null || processOf(transport).signalCode !== null ? resolve() : processOf(transport).once('exit', () => resolve())));
+
 const bridge = path.resolve(__dirname, 'bridges/standInBridge.js');
-const start = (env: NodeJS.ProcessEnv = {}, extra: { requestTimeoutMs?: number; startupTimeoutMs?: number; cleanup?: () => void } = {}) =>
+const start = (env: NodeJS.ProcessEnv = {}, extra: { requestTimeoutMs?: number; startupTimeoutMs?: number; quitTimeoutMs?: number; cleanup?: () => void } = {}) =>
   ProcessTransport.start({ command: process.execPath, args: [bridge], label: 'Stand-in', env: { ...process.env, ...env }, requestTimeoutMs: 2000, startupTimeoutMs: 3000, ...extra });
 
 test.describe('ProcessTransport speaks the bridge protocol', () => {
@@ -33,6 +36,23 @@ test.describe('ProcessTransport speaks the bridge protocol', () => {
     await transport.close();
   });
 
+  test('a dead COM connection comes back as SESSION_LOST (not ERROR, not a retryable NOT_FOUND)', async () => {
+    const transport = await start({ BRIDGE_SESSION_LOST_OP: 'busy' });
+    const error = (await transport.request({ op: 'busy' }).catch((e: unknown) => e)) as SapGuiTransportError;
+    expect(error.code).toBe('SESSION_LOST');
+    expect(await transport.request({ op: 'ping' })).toBe('pong');
+    await transport.close();
+  });
+
+  test('NOT_FOUND is decided by the bridge\'s code, not by the (localised) wording of the message', async () => {
+    const transport = await start({ BRIDGE_NOT_FOUND_TEXT: 'Das Steuerelement konnte nicht gefunden werden' });
+    await transport.request({ op: 'attach', connectionIndex: 0, sessionIndex: 0 });
+    const missing = (await transport.request({ op: 'get', id: 'wnd[0]/usr/nope', prop: 'text' }).catch((e: unknown) => e)) as SapGuiTransportError;
+    expect(missing.code).toBe('NOT_FOUND');
+    expect(missing.message).toBe('Das Steuerelement konnte nicht gefunden werden');
+    await transport.close();
+  });
+
   test('replies are matched to their requests even when they arrive out of order', async () => {
     const transport = await start({ BRIDGE_DELAY_OPS: 'ping:300' });
     const [slow, fast] = await Promise.all([transport.request({ op: 'ping' }), transport.request({ op: 'busy' })]);
@@ -47,12 +67,21 @@ test.describe('ProcessTransport speaks the bridge protocol', () => {
     await transport.close();
   });
 
-  test('a bridge that never says ready fails to start with a TIMEOUT and is cleaned up', async () => {
-    let cleaned = false;
-    const error = (await start({ BRIDGE_NO_READY: '1' }, { startupTimeoutMs: 300, cleanup: () => void (cleaned = true) }).catch((e: unknown) => e)) as SapGuiTransportError;
+  test('a bridge that never says ready fails to start with a TIMEOUT and is cleaned up exactly once', async () => {
+    let cleanups = 0;
+    const error = (await start({ BRIDGE_NO_READY: '1' }, { startupTimeoutMs: 300, cleanup: () => void cleanups++ }).catch((e: unknown) => e)) as SapGuiTransportError;
     expect(error.code).toBe('TIMEOUT');
     expect(error.message).toContain('did not become ready within 300ms');
-    expect(cleaned).toBe(true);
+    expect(cleanups).toBe(1);
+  });
+
+  test('a startup failure costs the startup timeout, not the startup timeout plus a 60 s `quit` wait', async () => {
+    test.setTimeout(15_000);
+    // the bridge neither says ready nor answers `quit`: asking it to quit politely used to cost one more request timeout (+3 s kill delay)
+    const startedAt = Date.now();
+    const error = (await start({ BRIDGE_NO_READY: '1', BRIDGE_HANG_OPS: 'quit' }, { startupTimeoutMs: 300, requestTimeoutMs: 60_000 }).catch((e: unknown) => e)) as SapGuiTransportError;
+    expect(error.code).toBe('TIMEOUT');
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
   });
 
   test('a request the bridge never answers times out and says SAP may be blocked by a dialog', async () => {
@@ -60,8 +89,52 @@ test.describe('ProcessTransport speaks the bridge protocol', () => {
     const error = (await transport.request({ op: 'busy' }).catch((e: unknown) => e)) as SapGuiTransportError;
     expect(error.code).toBe('TIMEOUT');
     expect(error.message).toMatch(/no reply to "busy" within 300ms.*dialog/);
-    expect(await transport.request({ op: 'ping' })).toBe('pong'); // the transport is still usable
     await transport.close();
+  });
+
+  test('after a timeout the bridge is killed, pending requests fail at once and later ones do not wait again', async () => {
+    const transport = await start({ BRIDGE_HANG_OPS: 'busy' }, { requestTimeoutMs: 400 });
+    const first = transport.request({ op: 'busy' }).catch((e: unknown) => e);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const second = transport.request({ op: 'busy' }).catch((e: unknown) => e); // would time out at ~600 ms on its own
+    expect(((await first) as SapGuiTransportError).code).toBe('TIMEOUT');
+    const stopped = (await second) as SapGuiTransportError;
+    expect(stopped.code).toBe('BRIDGE_EXITED');
+    expect(stopped.message).toContain('was stopped');
+    const startedAt = Date.now();
+    const later = (await transport.request({ op: 'ping' }).catch((e: unknown) => e)) as SapGuiTransportError;
+    expect(later.code).toBe('BRIDGE_EXITED');
+    expect(Date.now() - startedAt).toBeLessThan(200); // failed immediately, no second request timeout
+    await exited(transport); // the hung process is gone, not left holding the SAP session
+    await transport.close();
+  });
+
+  test('a bridge that closed its input does not crash the test run with an uncaught EPIPE: the request fails with a clear error', async () => {
+    const transport = await start({ BRIDGE_CLOSE_STDIN: '1' }, { requestTimeoutMs: 1500 });
+    await new Promise((resolve) => setTimeout(resolve, 300)); // let the bridge close its end
+    const error = (await transport.request({ op: 'ping' }).catch((e: unknown) => e)) as SapGuiTransportError;
+    expect(error).toBeInstanceOf(SapGuiTransportError);
+    expect(error.code).toBe('BRIDGE_EXITED');
+    expect(error.message).toMatch(/closed its input|could not send/);
+    await exited(transport); // killed
+    await transport.close();
+  });
+
+  test('close() asks the bridge to quit for 2 s at most, then kills it - not a 60 s request timeout', async () => {
+    test.setTimeout(15_000);
+    const transport = await start({ BRIDGE_HANG_OPS: 'quit' }, { requestTimeoutMs: 60_000, quitTimeoutMs: 300 });
+    const startedAt = Date.now();
+    await transport.close();
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    await exited(transport);
+  });
+
+  test('the default quit timeout is short (2 s), whatever the request timeout is', async () => {
+    test.setTimeout(15_000);
+    const transport = await start({ BRIDGE_HANG_OPS: 'quit' }, { requestTimeoutMs: 60_000 });
+    const startedAt = Date.now();
+    await transport.close();
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
   });
 
   test('a bridge that dies mid-request fails that request with its stderr, and every later one fast', async () => {

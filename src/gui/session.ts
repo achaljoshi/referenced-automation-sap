@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -15,6 +16,7 @@ import {
   type SapContext,
   type FindCriteria,
   type SapGuiChild,
+  type SapProgress,
   type SapGuiTransport,
   type SapGuiValue,
 } from './types';
@@ -26,6 +28,18 @@ export interface SapGuiSessionOptions {
   pollMs?: number;
   /** SAP must report "not busy" this many polls in a row before a step is considered finished - one idle blink between two server round trips isn't "done". Default 2. */
   stablePolls?: number;
+  /**
+   * After an action that should make SAP talk to the server (Enter, a button, a transaction), wait up to this long for the
+   * server's answer to show up - SAP's round-trip counter moving, or the screen/title/window count changing - BEFORE
+   * asking whether SAP is idle. "Busy=false" alone is also what SAP reports in the moment between the request leaving and
+   * the GUI noticing it is waiting, so on a slow link the next step would act on the previous screen.
+   * Some actions legitimately never reach the server (switching a tab, a client-side check): for those nothing changes and
+   * this is the bounded quiet period after which the session carries on. Raise it on a slow link; 0 restores the old
+   * "idle twice in a row" check. Default 250 ms (SAP_GUI_ROUNDTRIP_WAIT_MS).
+   */
+  roundTripWaitMs?: number;
+  /** Where screenshots are written before they are attached to the report. Default test-results/sap-evidence (SAP_GUI_EVIDENCE_DIR), falling back to the OS temp folder if that cannot be created. They are deleted once attached. */
+  evidenceDir?: string;
   /** 'steps' also takes a screenshot after every step that changes the screen (SAP_GUI_EVIDENCE=steps); evidence you ask for with sap.evidence() is always kept. Default 'off'. */
   evidence?: 'off' | 'steps';
   /** Ask SAP which transaction/program/screen it is on after each screen change, and attribute every step to it (journal, coverage, response-time baseline, failure messages). One extra call per screen change. Default true. */
@@ -178,8 +192,14 @@ export class SapGuiSession implements Adapter {
   /** How often to look while waiting. */
   readonly pollMs: number;
   private readonly stablePolls: number;
+  /** See SapGuiSessionOptions.roundTripWaitMs. */
+  readonly roundTripWaitMs: number;
+  private progressUnavailable = false;
+  /** Where the round trips stood when the most recent server-bound action started (see screenMovedSinceLastAction). */
+  private lastActionBaseline?: SapProgress;
   private readonly evidenceMode: 'off' | 'steps';
   private readonly trackContext: boolean;
+  private readonly evidenceDir?: string;
   readonly fallbackMode: 'report' | 'fail' | 'off';
   private readonly drift: LocatorDrift[] = [];
   /** The pooled SAP user this session was given (SAP_USER_POOL); `logon()` uses it. */
@@ -199,8 +219,10 @@ export class SapGuiSession implements Adapter {
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.pollMs = options.pollMs ?? 100;
     this.stablePolls = options.stablePolls ?? 2;
+    this.roundTripWaitMs = options.roundTripWaitMs ?? 250;
     this.evidenceMode = options.evidence ?? 'off';
     this.trackContext = options.trackContext ?? true;
+    this.evidenceDir = options.evidenceDir;
     this.fallbackMode = options.fallbacks ?? 'report';
   }
 
@@ -275,6 +297,50 @@ export class SapGuiSession implements Adapter {
         );
       }
       await sleep(calm > 0 ? Math.min(this.pollMs, CONFIRM_GAP_MS) : this.pollMs);
+    }
+  }
+
+  /**
+   * Where the server round trips stand right now; undefined when this transport cannot report them (a custom transport
+   * without the `progress` op) - the session then falls back to Busy alone.
+   */
+  private async progress(): Promise<SapProgress | undefined> {
+    if (this.progressUnavailable) return undefined;
+    try {
+      return (await this.transport.request({ op: 'progress' })) as SapProgress;
+    } catch (error) {
+      if (
+        error instanceof SapGuiTransportError &&
+        (error.code === 'TIMEOUT' || error.code === 'BRIDGE_EXITED' || error.code === 'SESSION_LOST')
+      )
+        throw error;
+      this.progressUnavailable = true;
+      log.debug(
+        `[sap-gui] this transport cannot report round trips (${error instanceof Error ? error.message : String(error)}) - waiting on Busy alone`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Has SAP answered (its round-trip counter moved, or the screen / title / window count changed) since the last action that
+   * goes to the server began? False when there was no such action or this transport cannot report it. For assertions that
+   * need evidence that the outcome of an action has arrived before they judge it.
+   */
+  async screenMovedSinceLastAction(): Promise<boolean> {
+    if (!this.lastActionBaseline) return false;
+    const now = await this.progress();
+    return now !== undefined && progressChanged(this.lastActionBaseline, now);
+  }
+
+  /** Waits until the server's answer to the action has reached the GUI, or the quiet period ends. Returns whether anything changed. */
+  private async waitForRoundTrip(before: SapProgress): Promise<boolean> {
+    const deadline = Date.now() + Math.min(this.roundTripWaitMs, this.timeoutMs);
+    for (;;) {
+      const now = await this.progress();
+      if (!now || progressChanged(before, now)) return true;
+      if (Date.now() >= deadline) return false;
+      await sleep(Math.min(this.pollMs, 25));
     }
   }
 
@@ -432,10 +498,18 @@ export class SapGuiSession implements Adapter {
     return this.step(method, id, { id, args: args.length > 0 ? args : undefined }, async () => {
       await this.ready(id);
       const { via, name } = parseMemberPath(method);
+      const roundTrip = SERVER_ROUND_TRIP_METHODS.has(name.toLowerCase());
+      // Taken while SAP is idle and before the action: the "after" reading only means something compared with this one.
+      const before = roundTrip ? await this.progress() : undefined;
+      if (before) this.lastActionBaseline = before;
       const result = await this.withRetry(id, () =>
         this.transport.request({ op: 'call', id, method: name, args, via }),
       );
-      if (SERVER_ROUND_TRIP_METHODS.has(name.toLowerCase())) {
+      if (roundTrip) {
+        if (before && this.roundTripWaitMs > 0 && !(await this.waitForRoundTrip(before)))
+          log.debug(
+            `[sap-gui] ${name} ${id}: no server round trip seen within ${this.roundTripWaitMs}ms - treating it as a client-side action`,
+          );
         await this.waitUntilIdle();
         await this.refreshContext();
         this.roundTripped = true;
@@ -673,7 +747,7 @@ export class SapGuiSession implements Adapter {
   /** Screenshot of the SAP window, kept and attached to the test report under `label`. Returns the file, or undefined if SAP could not take it. */
   async evidence(label: string): Promise<string | undefined> {
     const file = path.join(
-      os.tmpdir(),
+      this.screenshotDir(),
       `sap-evidence-${process.pid}-${Date.now()}-${++this.evidenceCount}.png`,
     );
     try {
@@ -688,12 +762,39 @@ export class SapGuiSession implements Adapter {
     }
   }
 
+  /**
+   * Where a screenshot file goes: under the test results (which the report owns and CI cleans up) when that folder can be
+   * created, the OS temp folder otherwise. A screenshot of a government or finance screen must not linger in a shared temp dir.
+   */
+  screenshotDir(): string {
+    const wanted = path.resolve(this.evidenceDir ?? path.join('test-results', 'sap-evidence'));
+    try {
+      fs.mkdirSync(wanted, { recursive: true });
+      return wanted;
+    } catch {
+      return os.tmpdir();
+    }
+  }
+
+  /** Deletes the screenshot files (call once they are attached to the report, which copies them). Never throws. */
+  discardEvidenceFiles(): void {
+    for (const item of this.evidenceFiles) {
+      try {
+        fs.rmSync(item.file, { force: true });
+      } catch {
+        // a file that cannot be removed is reported by the OS cleanup of the results folder, not by failing a test
+      }
+    }
+  }
+
   get evidenceItems(): ReadonlyArray<{ label: string; file: string }> {
     return this.evidenceFiles;
   }
 
   /** Forget per-test state (journal, evidence list, pop-up handlers) - the fixture calls this between tests so a reused session starts clean. */
   resetDiagnostics(): void {
+    this.discardEvidenceFiles();
+    this.lastActionBaseline = undefined;
     this.journal.length = 0;
     this.evidenceFiles.length = 0;
     this.popupHandlers.length = 0;
@@ -806,6 +907,21 @@ export class SapGuiSession implements Adapter {
       if (!(await this.exists('wnd[0]/tbar[0]/okcd'))) return;
       await this.setText('wnd[0]/tbar[0]/okcd', '/n');
       await this.sendVKey(0);
+      // Leaving a transaction with unsaved data raises a confirmation pop-up: the reset is not done until it is answered.
+      if (this.popupHandlers.length > 0) await this.dismissPopups();
+      if (await this.exists('wnd[1]')) {
+        const title = String(
+          (await this.transport
+            .request({ op: 'get', id: 'wnd[1]', prop: 'text' })
+            .catch(() => '')) ?? '',
+        );
+        throw new AdapterError(
+          'sap-gui',
+          'home',
+          `a pop-up${title ? ` "${title}"` : ''} is still in front after /n (usually "data will be lost" for a transaction left with unsaved data), so the session is not back on the start screen. ` +
+            `Say how to answer it with sap.onPopup('leave transaction', { title: /.../ }, (s) => s.press('wnd[1]/usr/btnSPOP-OPTION1')).`,
+        );
+      }
     });
   }
 
@@ -841,6 +957,19 @@ export class SapGuiSession implements Adapter {
       });
     });
   }
+}
+
+/** The server answered (its counter moved) or, on a SAP GUI that does not report the counter, the screen visibly changed. */
+function progressChanged(before: SapProgress, now: SapProgress): boolean {
+  if (before.roundTrips !== null && now.roundTrips !== null && before.roundTrips !== now.roundTrips)
+    return true;
+  return (
+    before.transaction !== now.transaction ||
+    before.program !== now.program ||
+    before.screen !== now.screen ||
+    before.title !== now.title ||
+    before.windows !== now.windows
+  );
 }
 
 function sleep(ms: number): Promise<void> {

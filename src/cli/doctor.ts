@@ -54,7 +54,7 @@ async function main(): Promise<void> {
     process.stdout.write(
       [
         '       Check, in order:',
-        '        1. the bridge: script execution blocked by policy? try SAP_GUI_POWERSHELL=<path to powershell.exe>, or the Java/JACOB bridge (SAP_GUI_TRANSPORT=java, see docs)',
+        '        1. the bridge: script execution blocked by policy? try SAP_GUI_POWERSHELL=<path to powershell.exe>, an approved signed copy of the bridge (SAP_GUI_POWERSHELL_SCRIPT_DIR), or the Java/JACOB bridge (SAP_GUI_TRANSPORT=java, see docs)',
         '        2. attach mode: SAP Logon is open with a connection and a session.  open mode: SAP_GUI_CONNECTION_NAME matches a SAP Logon entry exactly',
         '        3. SAP GUI > Options > Accessibility & Scripting > Scripting: "Enable scripting" is ticked, and both "Notify when a script attaches / opens a connection" are UNticked (those popups stall a run)',
         '        4. The SAP server allows it: profile parameter sapgui/user_scripting = TRUE (ask your SAP Basis team)',

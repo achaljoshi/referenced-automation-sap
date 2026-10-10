@@ -10,6 +10,7 @@
  * changing what a script does.
  */
 import { formatLink } from '../gui/memberPath';
+import { looksSecret, redactWith } from './secrets';
 import type { SapGuiValue } from '../gui/types';
 
 export type Expr =
@@ -17,7 +18,9 @@ export type Expr =
   | { kind: 'number'; value: number }
   | { kind: 'boolean'; value: boolean }
   | { kind: 'variable'; name: string }
-  | { kind: 'concat'; parts: Expr[] };
+  | { kind: 'concat'; parts: Expr[] }
+  /** Not in a recording: written by the converter in place of a secret literal - read from the environment when the test runs. */
+  | { kind: 'env'; envVar: string; secret: boolean };
 
 export type Step =
   | { kind: 'set'; id: string; prop: string; value: Expr; line: number }
@@ -32,6 +35,8 @@ export type Step =
 export interface ParseWarning {
   line: number;
   message: string;
+  /** 'todo' (default): needs a human decision and fails `--strict`. 'info': reports something the converter did on purpose (a secret replaced by an environment read). */
+  severity?: 'todo' | 'info';
 }
 
 export interface ParseResult {
@@ -219,9 +224,17 @@ export function parseVbs(source: string): ParseResult {
   const warn = (line: number, message: string) => warnings.push({ line, message });
 
   const elementVars = new Map<string, string>();
-  const withStack: string[] = [];
+  /** One entry per open `With`: the element id it targets, '' for the session, or null when the target could not be resolved. */
+  const withStack: Array<string | null> = [];
   let preambleDepth = 0;
   let unsupportedDepth = 0;
+  /** Open `With` blocks (nested ones included) inside a `With` whose target is unknown: nothing in there can be resolved. */
+  let unknownWithDepth = 0;
+  const unsupported = (source: string, reason: string, line: number, unknownTarget = false): Step => {
+    // the source and the reason end up in comments and warnings of a committed file: typed secrets must not
+    const secret = looksSecret(source, { unknownTarget });
+    return { kind: 'unsupported', source: redactWith(source, secret), reason: redactWith(reason, secret), line };
+  };
 
   const commentsByLine = new Map(comments.map((c) => [c.line, c.text]));
   const emitCommentsBefore = (line: number) => {
@@ -243,6 +256,7 @@ export function parseVbs(source: string): ParseResult {
     if (text.startsWith('.')) {
       const base = withStack[withStack.length - 1];
       if (base === undefined) throw new Unsupported('"." used outside a With block');
+      if (base === null) throw new Unsupported('inside a With block whose target could not be converted');
       // `.findById("rel")` inside `With session.findById("parent")`
       const rel = /^\.findById\s*\(\s*("(?:[^"]|"")*")\s*\)/i.exec(text);
       if (rel) {
@@ -315,7 +329,20 @@ export function parseVbs(source: string): ParseResult {
     if (unsupportedDepth > 0) {
       if (BLOCK_CLOSE.test(text) || /^end\s+if\b/i.test(text)) unsupportedDepth--;
       else if (IF_BLOCK_OPEN.test(text) || BLOCK_OPEN.test(text)) unsupportedDepth++;
-      steps.push({ kind: 'unsupported', source: text, reason: 'inside control flow (If/For/Do/...) - convert by hand', line });
+      steps.push(unsupported(text, 'inside control flow (If/For/Do/...) - convert by hand', line, true));
+      continue;
+    }
+
+    // --- everything inside a With block whose target we could not resolve: a leading `.text = ...` must never be read against the session
+    if (unknownWithDepth > 0) {
+      if (/^end\s+with\b/i.test(text)) {
+        unknownWithDepth--;
+        withStack.pop();
+      } else if (/^with\b/i.test(text)) {
+        unknownWithDepth++;
+        withStack.push(null);
+      }
+      steps.push(unsupported(text, 'inside a With block whose target could not be converted - convert by hand', line, true));
       continue;
     }
 
@@ -335,11 +362,16 @@ export function parseVbs(source: string): ParseResult {
     // --- structure
     const withMatch = /^with\s+(.+)$/i.exec(text);
     if (withMatch) {
+      const target = (withMatch[1] as string).trim();
       try {
-        withStack.push(resolveTarget(withMatch[1] as string).id);
+        if (/^session$/i.test(target)) withStack.push('');
+        else if (/^[A-Za-z_]\w*$/.test(target) && elementVars.has(target.toLowerCase())) withStack.push(elementVars.get(target.toLowerCase()) as string);
+        else withStack.push(resolveTarget(target).id);
       } catch (error) {
-        withStack.push('');
-        steps.push({ kind: 'unsupported', source: text, reason: (error as Error).message, line });
+        withStack.push(null);
+        unknownWithDepth = 1;
+        steps.push(unsupported(text, (error as Error).message, line, true));
+        warn(line, 'a With block was not converted - everything inside it is left as TODO comments');
       }
       continue;
     }
@@ -348,18 +380,18 @@ export function parseVbs(source: string): ParseResult {
       continue;
     }
     if (IF_SINGLE_LINE.test(text) && !IF_BLOCK_OPEN.test(text)) {
-      steps.push({ kind: 'unsupported', source: text, reason: 'conditional statement - convert by hand', line });
+      steps.push(unsupported(text, 'conditional statement - convert by hand', line));
       warn(line, 'conditional logic was not converted');
       continue;
     }
     if (IF_BLOCK_OPEN.test(text) || BLOCK_OPEN.test(text)) {
       unsupportedDepth = 1;
-      steps.push({ kind: 'unsupported', source: text, reason: 'control flow (If/For/Do/...) - convert by hand', line });
+      steps.push(unsupported(text, 'control flow (If/For/Do/...) - convert by hand', line));
       warn(line, 'control flow was not converted - everything inside it is left as TODO comments');
       continue;
     }
     if (BLOCK_CLOSE.test(text) || BLOCK_MIDDLE.test(text) || /^end\s+if\b/i.test(text)) {
-      steps.push({ kind: 'unsupported', source: text, reason: 'stray block keyword', line });
+      steps.push(unsupported(text, 'stray block keyword', line));
       continue;
     }
 
@@ -372,14 +404,14 @@ export function parseVbs(source: string): ParseResult {
           try {
             steps.push({ kind: 'let', name: c[1] as string, value: parseExpression(c[2] as string), line });
           } catch {
-            steps.push({ kind: 'unsupported', source: text, reason: 'Const value not supported', line });
+            steps.push(unsupported(text, 'Const value not supported', line));
           }
         }
       }
       continue;
     }
     if (/^(wscript\.echo|msgbox)\b/i.test(text)) {
-      steps.push({ kind: 'unsupported', source: text, reason: 'dialog/echo has no equivalent in an automated run - dropped', line });
+      steps.push(unsupported(text, 'dialog/echo has no equivalent in an automated run - dropped', line));
       warn(line, 'a MsgBox/Echo was dropped');
       continue;
     }
@@ -415,8 +447,9 @@ export function parseVbs(source: string): ParseResult {
       steps.push(parseMemberStatement(text, line));
     } catch (error) {
       if (!(error instanceof Unsupported)) throw error;
-      steps.push({ kind: 'unsupported', source: text, reason: error.message, line });
-      warn(line, `could not convert: ${error.message}`);
+      const step = unsupported(text, error.message, line);
+      steps.push(step);
+      warn(line, `could not convert: ${(step as { reason: string }).reason}`);
     }
   }
 

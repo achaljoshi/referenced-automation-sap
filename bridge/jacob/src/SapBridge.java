@@ -26,6 +26,16 @@ public final class SapBridge {
     private static PrintStream protocol;
     private static Dispatch session;
 
+    /** HRESULTs that mean the COM connection to SAP GUI is gone (retrying cannot help): RPC server unavailable (0x800706BA), RPC call failed (0x800706BE, 0x800706BF), object disconnected (0x80010108), server died (0x80010007, 0x80010012), object not connected (0x800401FD). */
+    private static final int[] DEAD_HRESULTS = {0x800706BA, 0x800706BE, 0x800706BF, 0x80010108, 0x80010007, 0x80010012, 0x800401FD};
+
+    /** FindById itself failed (and the connection is alive): there is no such control, whatever language SAP GUI words its message in. */
+    private static final class NotFound extends RuntimeException {
+        NotFound(String message) {
+            super(message);
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         // Only protocol lines may reach stdout: anything a library prints goes to stderr instead.
         protocol = new PrintStream(System.out, true, "UTF-8");
@@ -50,7 +60,7 @@ public final class SapBridge {
                     reply(rid, true, handle(op, cmd), null, null);
                 } catch (Throwable t) {
                     String message = message(t);
-                    reply(rid, false, null, message, message.contains("could not be found") ? "NOT_FOUND" : "ERROR");
+                    reply(rid, false, null, message, code(t, message));
                 }
             }
         } finally {
@@ -81,10 +91,13 @@ public final class SapBridge {
             }
             case "busy":
                 return Boolean.valueOf(Dispatch.get(session, "Busy").getBoolean());
+            case "progress":
+                return progress();
             case "exists":
                 try {
                     return Boolean.valueOf(find((String) cmd.get("id")) != null);
                 } catch (Throwable t) {
+                    if (isDead(t)) throw (RuntimeException) t; // a dead connection is not "the control is absent"
                     return Boolean.FALSE;
                 }
             case "get": {
@@ -115,7 +128,32 @@ public final class SapBridge {
 
     private static Dispatch find(String id) {
         if (id == null || id.isEmpty()) return session;
-        return Dispatch.call(session, "FindById", id).toDispatch();
+        try {
+            return Dispatch.call(session, "FindById", id).toDispatch();
+        } catch (ComFailException e) {
+            if (isDead(e)) throw e;
+            throw new NotFound(message(e));
+        }
+    }
+
+    /** Classified by what failed (a dead connection by HRESULT, a missing control by FindById failing), not by SAP GUI's localised wording; the English text is only a fallback for failures that did not come through find(). */
+    private static String code(Throwable t, String message) {
+        if (isDead(t)) return "SESSION_LOST";
+        if (t instanceof NotFound) return "NOT_FOUND";
+        return message.contains("could not be found") ? "NOT_FOUND" : "ERROR";
+    }
+
+    private static boolean isDead(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof ComFailException) {
+                int h = ((ComFailException) c).getHResult();
+                for (int dead : DEAD_HRESULTS) {
+                    if (h == dead) return true;
+                }
+            }
+            if (c.getCause() == c) break;
+        }
+        return false;
     }
 
     /** Steps through objects the way a recorded line does: .columns.elementAt(1).width. VBScript does not tell properties from methods apart, and neither does Dispatch.call. */
@@ -152,6 +190,30 @@ public final class SapBridge {
         m.put("tooltip", prop(target, "Tooltip"));
         Object changeable = readOrNull(target, "Changeable");
         m.put("changeable", Boolean.valueOf(!Boolean.FALSE.equals(changeable)));
+        return m;
+    }
+
+    /** A cheap "has the server answered yet?" reading: the round-trip counter plus what is on screen. */
+    private static Object progress() {
+        Dispatch info = Dispatch.get(session, "Info").toDispatch();
+        int windows = 1;
+        for (int n = 1; n <= 4; n++) {
+            boolean present = false;
+            try {
+                present = find("wnd[" + n + "]") != null;
+            } catch (Throwable t) {
+                if (isDead(t)) throw (RuntimeException) t;
+            }
+            if (!present) break;
+            windows = n + 1;
+        }
+        Map<String, Object> m = new LinkedHashMap<String, Object>();
+        m.put("roundTrips", readOrNull(info, "RoundTrips"));
+        m.put("transaction", prop(info, "Transaction"));
+        m.put("program", prop(info, "Program"));
+        m.put("screen", prop(info, "ScreenNumber"));
+        m.put("title", prop(find("wnd[0]"), "Text"));
+        m.put("windows", Integer.valueOf(windows));
         return m;
     }
 
@@ -279,6 +341,7 @@ public final class SapBridge {
         try {
             return convert(Dispatch.get(d, name));
         } catch (Throwable t) {
+            if (isDead(t)) throw (RuntimeException) t; // an absent property reads as null; a dead connection does not
             return null;
         }
     }
