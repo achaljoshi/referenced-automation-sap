@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **BDD (`playwright-bdd` 9.2.1, pinned)**: a `bdd` project and sample features in `features/` (sales orders, test data) running against the simulator, `npm run test:bdd`. `registerSapSteps` now understands `{{placeholders}}` in every string and stores a remembered status-bar value as `{{name}}` too, so steps from the UI and API libraries can use it.
 - **Classic SAP GUI framework**: `sap-vbs-to-playwright` (recording -> flat spec, or `--page-objects`, or `--data` for CSV-driven tests), `SapGuiSession` (waits for SAP, retries, journal, evidence, pop-up handlers, health/home/logoff), Playwright-style locators (`getByLabel/Tooltip/Text/Type`, `orElse` fallbacks reported as drift), type-driven `click()`/`fill()`, retrying assertions, grid/tree/table helpers, `SapPage`, screen contracts (`toMatchScreenContract`, `sap-gui-contracts`), the `sapData` registry with guaranteed cleanup, a user pool for parallel workers, secret providers (env, Windows DPAPI), `sap-gui-insights` (transaction coverage, response-time baseline), `sap-gui-doctor` (incl. `--conformance`), reusable BDD steps (`registerSapSteps`).
 - Two transports behind one line protocol: PowerShell (default) and Java/JACOB (`SAP_GUI_TRANSPORT=java`, `bridge/jacob`).
 - A built-in SAP simulator, stand-in bridges, and 280+ tests with negative controls.

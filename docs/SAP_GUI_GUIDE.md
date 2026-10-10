@@ -216,6 +216,30 @@ Cleanups run after the test - pass or fail, after every retry, newest first, con
 ### Run workers in parallel without "already logged on"
 `SAP_USER_POOL=U1,U2,U3` (with `SAP_GUI_MODE=open`): each worker leases a distinct user (exclusive across processes on one machine, with a heartbeat and recovery from crashed runs) and `logon()` uses its own `SAP_PASSWORD_<USER>` or the shared `SAP_PASSWORD`. A file lock cannot coordinate several CI machines using the same users; give each machine its own users.
 
+### Gherkin features (`playwright-bdd` 9.2.1)
+
+The same SAP can be driven from business-readable features. The vocabulary is in the package (`registerSapSteps`), so every project says it the same way; the sample features in `features/` run against the simulator.
+
+```gherkin
+Scenario: The order number SAP reports can be used later
+  Given I am logged on to SAP
+  When I open transaction "VA01"
+  And I enter "OR" in the field labelled "Order Type"
+  And I enter "BDD-{{random:alnum(6)}}" in the field labelled "Customer Reference"
+  And I click the toolbar button "Save"
+  And I remember the number from the status bar matching "Order (\d+)" as "order"
+  Then the status bar shows "Order {{order}} has been saved"
+```
+
+```ts
+// features/steps/steps.ts
+const { Given, When, Then } = createBdd(test);       // test = mergeTests(bddTest, sapGuiTest), see features/steps/fixtures.ts
+registerDataSteps({ Given, Then });                   // from the UI package: variables, random data, dates, env
+registerSapSteps({ Given, When, Then });
+```
+
+Every string in a step understands `{{placeholders}}` (`{{random:alnum(6)}}`, `{{date:+7d}}`, `{{env:X}}`, `{{uuid}}`, a saved value). A value remembered from the status bar is stored as `{{order}}` too, so in a project that also has the UI and API step libraries (see `referenced-automation-ui-api`) the next step can call an API or check a web page with it. `npm run test:bdd` runs only the features. Against a real SAP, delete the `sapGuiTransport` override in `features/steps/fixtures.ts` and set `SAP_GUI_MODE` / the `.env` files as for any other SAP test.
+
 ## 6. Converting recordings
 
 ```bash

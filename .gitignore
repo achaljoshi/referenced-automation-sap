@@ -54,3 +54,6 @@ out/
 # Built Java bridge
 bridge/jacob/out/
 bridge/jacob/sap-bridge.jar
+
+# Tests generated from Gherkin features by bddgen
+.features-gen/

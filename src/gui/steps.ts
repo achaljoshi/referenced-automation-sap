@@ -1,3 +1,4 @@
+import type { placeholders } from '@automation/referenced-automation-utils';
 import { expect } from './matchers';
 import type { SapGuiSession } from './session';
 import { ensureLoggedIn } from './logon';
@@ -18,6 +19,8 @@ export interface BddSteps {
 interface SapStepFixtures {
   sap: SapGuiSession;
   sapScenario: Map<string, string>;
+  /** The scenario's named values and `{{placeholders}}` (the test's `vars` fixture): every string in a step goes through it, and remembered values are stored there too so steps from other libraries (UI, API) can use `{{order}}`. */
+  vars: placeholders.ScenarioVariables;
 }
 
 /**
@@ -33,41 +36,46 @@ interface SapStepFixtures {
  *   Then the status bar shows a success message containing "has been saved"
  *
  * Fields are found by the label the user sees; a technical id step exists for the cases that have no label.
+ * Every string understands {{placeholders}} ({{random:alnum(6)}}, {{date:+7d}}, {{env:X}}, {{uuid}}, a remembered {{order}}),
+ * and a value remembered from the status bar is available as {{name}} to steps from the UI and API libraries too.
  */
 export function registerSapSteps({ Given, When, Then }: BddSteps): void {
   Given('I am logged on to SAP', async ({ sap }: SapStepFixtures) => {
     await ensureLoggedIn(sap);
   });
 
-  When('I open transaction {string}', async ({ sap }: SapStepFixtures, tcode: string) => {
-    await sap.startTransaction(tcode);
+  When('I open transaction {string}', async ({ sap, vars }: SapStepFixtures, tcode: string) => {
+    await sap.startTransaction(vars.interpolate(tcode));
   });
 
   When(
     'I enter {string} in the field labelled {string}',
-    async ({ sap }: SapStepFixtures, value: string, label: string) => {
-      await sap.getByLabel(label).fill(value);
+    async ({ sap, vars }: SapStepFixtures, value: string, label: string) => {
+      await sap.getByLabel(vars.interpolate(label)).fill(vars.interpolate(value));
     },
   );
 
   When(
     'I enter {string} in the field with id {string}',
-    async ({ sap }: SapStepFixtures, value: string, id: string) => {
-      await sap.locator(id).fill(value);
+    async ({ sap, vars }: SapStepFixtures, value: string, id: string) => {
+      await sap.locator(id).fill(vars.interpolate(value));
     },
   );
 
-  When('I tick the checkbox {string}', async ({ sap }: SapStepFixtures, text: string) => {
-    await sap.getByText(text, { type: 'GuiCheckBox' }).check();
+  When('I tick the checkbox {string}', async ({ sap, vars }: SapStepFixtures, text: string) => {
+    await sap.getByText(vars.interpolate(text), { type: 'GuiCheckBox' }).check();
   });
 
-  When('I click {string}', async ({ sap }: SapStepFixtures, text: string) => {
-    await sap.getByText(text).click();
+  When('I click {string}', async ({ sap, vars }: SapStepFixtures, text: string) => {
+    await sap.getByText(vars.interpolate(text)).click();
   });
 
-  When('I click the toolbar button {string}', async ({ sap }: SapStepFixtures, tooltip: string) => {
-    await sap.getByTooltip(tooltip).click();
-  });
+  When(
+    'I click the toolbar button {string}',
+    async ({ sap, vars }: SapStepFixtures, tooltip: string) => {
+      await sap.getByTooltip(vars.interpolate(tooltip)).click();
+    },
+  );
 
   When('I press Enter', async ({ sap }: SapStepFixtures) => {
     await sap.sendVKey(0);
@@ -79,37 +87,39 @@ export function registerSapSteps({ Given, When, Then }: BddSteps): void {
 
   When(
     'I remember the number from the status bar matching {string} as {string}',
-    async ({ sap, sapScenario }: SapStepFixtures, pattern: string, name: string) => {
+    async ({ sap, sapScenario, vars }: SapStepFixtures, pattern: string, name: string) => {
       const { text } = await sap.statusBar();
       const match = new RegExp(pattern).exec(text);
       if (!match)
         throw new Error(
           `the status bar says "${text || '(empty)'}", which does not match ${pattern}`,
         );
-      sapScenario.set(name, (match[1] ?? match[0]).trim());
+      const value = (match[1] ?? match[0]).trim();
+      sapScenario.set(name, value);
+      vars.set(name, value);
     },
   );
 
   When(
     'I enter the remembered {string} in the field labelled {string}',
-    async ({ sap, sapScenario }: SapStepFixtures, name: string, label: string) => {
-      const value = sapScenario.get(name);
+    async ({ sap, sapScenario, vars }: SapStepFixtures, name: string, label: string) => {
+      const value = sapScenario.get(name) ?? vars.get(name);
       if (value === undefined)
         throw new Error(
           `nothing was remembered as "${name}" - use "I remember the number from the status bar matching ... as "${name}"" first`,
         );
-      await sap.getByLabel(label).fill(value);
+      await sap.getByLabel(vars.interpolate(label)).fill(value);
     },
   );
 
-  Then('the status bar shows {string}', async ({ sap }: SapStepFixtures, text: string) => {
-    await expect(sap).toHaveStatusMessage(text);
+  Then('the status bar shows {string}', async ({ sap, vars }: SapStepFixtures, text: string) => {
+    await expect(sap).toHaveStatusMessage(vars.interpolate(text));
   });
 
   Then(
     'the status bar shows a success message containing {string}',
-    async ({ sap }: SapStepFixtures, text: string) => {
-      await expect(sap).toHaveStatusMessage(text, { type: 'S' });
+    async ({ sap, vars }: SapStepFixtures, text: string) => {
+      await expect(sap).toHaveStatusMessage(vars.interpolate(text), { type: 'S' });
     },
   );
 
@@ -119,12 +129,15 @@ export function registerSapSteps({ Given, When, Then }: BddSteps): void {
 
   Then(
     'the field labelled {string} contains {string}',
-    async ({ sap }: SapStepFixtures, label: string, value: string) => {
-      await expect(sap.getByLabel(label)).toHaveText(value);
+    async ({ sap, vars }: SapStepFixtures, label: string, value: string) => {
+      await expect(sap.getByLabel(vars.interpolate(label))).toHaveText(vars.interpolate(value));
     },
   );
 
-  Then('the screen title contains {string}', async ({ sap }: SapStepFixtures, text: string) => {
-    await expect(sap).toHaveTitle(text);
-  });
+  Then(
+    'the screen title contains {string}',
+    async ({ sap, vars }: SapStepFixtures, text: string) => {
+      await expect(sap).toHaveTitle(vars.interpolate(text));
+    },
+  );
 }

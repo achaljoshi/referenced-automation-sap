@@ -26,7 +26,8 @@
     "clean": "rimraf dist *.tgz",
     "lint": "eslint . --ext .ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "playwright test",
+    "test": "bddgen && playwright test",
+    "test:bdd": "bddgen && playwright test --project=bdd",
     "test:smoke": "playwright test --grep @smoke",
     "test:regression": "playwright test --grep @regression",
     "pretest": "npm run build",
@@ -61,6 +62,7 @@
     "allure-commandline": "^2.32.0",
     "allure-playwright": "^3.0.9",
     "eslint": "^8.57.1",
+    "playwright-bdd": "9.2.1",
     "playwright-core": "^1.64.0",
     "rimraf": "^6.0.1",
     "typescript": "^5.7.3"
