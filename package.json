@@ -68,8 +68,8 @@
     "typescript": "^5.7.3"
   },
   "dependencies": {
-    "@automation/referenced-automation-ui": "file:../shared-packages/automation-referenced-automation-ui-1.0.0.tgz",
-    "@automation/referenced-automation-utils": "file:../shared-packages/automation-referenced-automation-utils-1.0.0.tgz"
+    "@automation/referenced-automation-ui": "^1.0.0",
+    "@automation/referenced-automation-utils": "^1.0.0"
   },
   "bin": {
     "sap-vbs-to-playwright": "./dist/cli/convertVbs.js",

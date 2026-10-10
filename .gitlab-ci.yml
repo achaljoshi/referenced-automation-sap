@@ -56,20 +56,13 @@
 # without blocking the pipeline on a network path outside this repo's
 # control.
 #
-# ---- Cross-repo dependency note ----
+# ---- Cross-repo dependencies: installed by version ----
 #
-# This repo depends on referenced-automation-utils and
-# referenced-automation-ui, not yet published to a registry - see
-# referenced-automation-utils' README for why. The `build` stage below
-# clones both fresh (utils first - ui's own build needs it already
-# packaged) and packages them with their own scripts/create-package.sh,
-# the exact same scripts a developer runs locally, so CI and local setup
-# never diverge.
-#
-# This assumes both sibling repos live in the same GitLab group/namespace
-# as this repo and are reachable with this job's own CI_JOB_TOKEN. If your
-# org's GitLab layout differs, override UTILS_REPO_URL/UI_REPO_URL as
-# CI/CD variables instead of editing this file.
+# The @automation/* packages this repo uses are listed with their versions in package.json and installed by
+# `npm ci` from the registry in NPM_REGISTRY_URL, like any other package - nothing is cloned or packed here.
+# So every package this repo depends on must be PUBLISHED there at the version package.json asks for
+# (README: Publishing a package). To take a newer version, change it in package.json, run `npm install` and
+# commit package.json and package-lock.json.
 # ============================================================================
 
 image: csg-cst-docker-local.artifactory.alm.corp.hmrc.gov.uk:443/common/microsoft/playwright:v1.47.0-jammy
@@ -87,8 +80,6 @@ stages:
   - report
 
 variables:
-  UTILS_REPO_URL: "${CI_SERVER_URL}/${CI_PROJECT_NAMESPACE}/referenced-automation-utils.git"
-  UI_REPO_URL: "${CI_SERVER_URL}/${CI_PROJECT_NAMESPACE}/referenced-automation-ui.git"
   npm_config_cache: "${CI_PROJECT_DIR}/.npm-cache"
 
 cache:
@@ -100,18 +91,9 @@ before_script:
   - if [ -n "${NPM_REGISTRY_URL:-}" ]; then npm config set registry "$NPM_REGISTRY_URL"; fi
   - if [ -n "${PLAYWRIGHT_DOWNLOAD_HOST:-}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST; fi
 
-.package_dependencies: &package_dependencies
-  - SHARED_PACKAGES_DIR="$(realpath "${CI_PROJECT_DIR}/../shared-packages")"
-  - mkdir -p "$SHARED_PACKAGES_DIR"
-  - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${UTILS_REPO_URL#https://}" /tmp/referenced-automation-utils
-  - bash /tmp/referenced-automation-utils/scripts/create-package.sh "$SHARED_PACKAGES_DIR"
-  - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${UI_REPO_URL#https://}" /tmp/referenced-automation-ui
-  - bash /tmp/referenced-automation-ui/scripts/create-package.sh "$SHARED_PACKAGES_DIR"
-
 build:
   stage: build
   script:
-    - *package_dependencies
     - npm ci
     - npm run build
     - npm run lint
@@ -124,7 +106,6 @@ test:
   stage: test
   needs: ["build"]
   script:
-    - *package_dependencies
     - npm ci
     - npx playwright install chromium
     - npm run test:smoke
@@ -147,7 +128,6 @@ regression:
   needs: ["build"]
   allow_failure: true
   script:
-    - *package_dependencies
     - npm ci
     - npx playwright install chromium
     - npm run test:regression
@@ -171,9 +151,8 @@ regression:
 # runner's tag, (2) check the shell commands match that runner's shell
 # (PowerShell on a default Windows runner), (3) set SAP_USER / SAP_PASSWORD /
 # SAP_CLIENT as masked CI variables, (4) run `npm run doctor` there first, and
-# (5) make sure ../shared-packages holds the utils and ui tarballs before
-# `npm ci` - the Linux jobs build them with the bash snippet above
-# (*package_dependencies), which a PowerShell runner cannot run as written.
+# (5) make sure the runner can reach NPM_REGISTRY_URL (the utils and ui packages are installed from there by
+# version, like everything else). The registry is set in the script below because
 # `before_script` is cleared (it is Linux/sh) and the Docker `image` above is
 # ignored by a Windows *shell* executor, which is what this job assumes.
 sapgui:
@@ -185,6 +164,7 @@ sapgui:
     - sap-gui-windows   # PLACEHOLDER - rename to your Windows runner's tag
   before_script: []
   script:
+    - if ($env:NPM_REGISTRY_URL) { npm config set registry $env:NPM_REGISTRY_URL }
     - npm ci
     - npm run build
     - npm run doctor
@@ -209,7 +189,6 @@ security:
   needs: ["build"]
   allow_failure: true
   script:
-    - *package_dependencies
     - npm ci
     - npx automation-scan-secrets
     - npx automation-audit-gate
