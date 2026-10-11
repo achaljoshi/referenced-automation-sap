@@ -21,5 +21,7 @@ export { SapUserPool, type UserLease, type LeaseHolder, type UserPoolOptions } f
 export { captureContract, diffContracts, formatDiff, saveContract, loadContract, contractPath, DEFAULT_CONTRACTS_DIR, type ScreenContract, type ContractControl, type ContractDiff, type CaptureOptions } from './contract';
 export { runConformance, formatConformance, type ConformanceReport, type ConformanceResult, type ConformanceOptions } from './conformance';
 export { JavaTransport, type JavaTransportOptions } from './javaTransport';
-export { startRealTransport, selectedTransport, type TransportKind } from './transportFactory';
+export { RemoteTransport, mapRemoteError, type RemoteTransportOptions } from './remoteTransport';
+export { decodeLine, encodeRequest, type BridgeLine } from './bridgeProtocol';
+export { startRealTransport, selectedTransport, releaseRemoteHost, type TransportKind } from './transportFactory';
 export { registerSapSteps, type BddSteps } from './steps';

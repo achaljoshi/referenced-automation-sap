@@ -4,7 +4,7 @@ import { test as uiTest } from '@automation/referenced-automation-ui';
 import { getLogger, loadEnv } from '@automation/referenced-automation-utils';
 import { appendCreated, DEFAULT_DATA_DIR, formatCreated, SapDataRegistry, type CreatedObject } from './data';
 import { createSampleSapSystem } from './fakeSapGui';
-import { startRealTransport } from './transportFactory';
+import { selectedTransport, startRealTransport } from './transportFactory';
 import { appendInsight, DEFAULT_INSIGHTS_DIR } from '../insights';
 import { SapUserPool, type UserLease } from './pool';
 import { SapGuiSession } from './session';
@@ -50,6 +50,8 @@ export class SapConnection {
   private session?: SapGuiSession;
   private opened = false;
   private lease?: UserLease;
+  /** Ends this worker's use of the remote desktop host (SAP_GUI_TRANSPORT=remote); set once the real transport has started. */
+  private releaseRemote?: () => Promise<void>;
 
   constructor(
     private readonly options: Pick<SapGuiOptions, 'sapGuiMode' | 'sapGuiTransport' | 'sapGuiReuse'>,
@@ -72,6 +74,13 @@ export class SapConnection {
    * issue for the simulator or a custom transport (each worker has its own), nor for mode=open (a connection per worker).
    */
   assertSessionNotShared(workers: number): void {
+    // Remote: one interactive RDP desktop and one agent that handles one request at a time, whatever the mode.
+    if (workers > 1 && this.remoteSelected) {
+      throw new Error(
+        `SAP_GUI_TRANSPORT=remote with ${workers} workers: every worker would drive the same SAP GUI on the one remote desktop (and its agent answers one request at a time). ` +
+          'Run with --workers=1 (this repo\'s playwright.config.ts does that by default - was WORKERS or --workers set?).',
+      );
+    }
     if (workers > 1 && this.mode === 'attach' && !this.simulated && !this.options.sapGuiTransport) {
       throw new Error(
         `SAP_GUI_MODE=attach with ${workers} workers: every worker would drive the same SAP GUI window. ` +
@@ -85,9 +94,14 @@ export class SapConnection {
     return this.env.getBoolean('SAP_GUI_SIMULATOR', false);
   }
 
-  /** Can this machine run SAP GUI tests at all? (Windows, a custom transport, or the simulator.) */
+  /** SAP GUI is on a remote desktop host: SAP_GUI_TRANSPORT=remote with the real transport (not the simulator, not a custom transport). */
+  get remoteSelected(): boolean {
+    return !this.simulated && !this.options.sapGuiTransport && selectedTransport() === 'remote';
+  }
+
+  /** Can this machine run SAP GUI tests at all? (Windows, a custom transport, the simulator, or SAP GUI on a remote desktop host.) */
   get canRun(): boolean {
-    return process.platform === 'win32' || Boolean(this.options.sapGuiTransport) || this.simulated;
+    return process.platform === 'win32' || Boolean(this.options.sapGuiTransport) || this.simulated || this.remoteSelected;
   }
 
   get reuse(): 'worker' | 'test' {
@@ -115,6 +129,7 @@ export class SapConnection {
       if (await this.session.healthCheck()) return this.session;
       log.warn('[sap-gui] the SAP session is no longer alive - reconnecting');
       await this.dispose();
+      await this.releaseHost(); // a dead agent means a dead host: reconnect from scratch, not through a half-closed one
     }
     this.session = await this.connect();
     return this.session;
@@ -133,6 +148,16 @@ export class SapConnection {
     await session.close().catch(() => undefined);
     this.lease?.release();
     this.lease = undefined;
+  }
+
+  /**
+   * Ends this worker's use of the remote desktop host and forgets it (the next use connects afresh). Not part of dispose(): with
+   * SAP_GUI_REUSE=test the bridge is replaced per test, but the RDP session must not be reopened per test. A no-op unless remote.
+   */
+  async releaseHost(): Promise<void> {
+    const release = this.releaseRemote;
+    this.releaseRemote = undefined;
+    await release?.().catch((error: unknown) => log.warn(`[sap-gui] could not release the remote desktop host: ${String(error)}`));
   }
 
   private async connect(): Promise<SapGuiSession> {
@@ -173,7 +198,7 @@ export class SapConnection {
               transitionDelayMs: 100,
             })
           : undefined) ??
-        (await startRealTransport()).transport;
+        (await this.startReal()).transport;
       const session = await this.openSession(mode, transport, env, timeoutMs, evidence, fallbacks, roundTripWaitMs);
       if (this.lease) session.assignedUser = this.lease.user;
       return session;
@@ -183,6 +208,12 @@ export class SapConnection {
       this.lease = undefined;
       throw error;
     }
+  }
+
+  private async startReal() {
+    const started = await startRealTransport();
+    this.releaseRemote = started.release;
+    return started;
   }
 
   private async openSession(
@@ -231,6 +262,7 @@ export class SapConnection {
  *   SAP_GUI_TIMEOUT_MS        longest any one step waits               (default 30000)
  *   SAP_GUI_REUSE             worker | test                            (default worker)
  *   SAP_GUI_EVIDENCE          off | failure | steps                    (default failure)
+ *   SAP_GUI_TRANSPORT         powershell | java | remote (SAP GUI on a remote desktop host; REMOTE_* keys, one worker)
  *   SAP_GUI_POWERSHELL        path to powershell.exe (32-bit SAP GUI may need the SysWOW64 one)
  *   SAP_GUI_LOGON_PATH        saplogon.exe, started for mode=open if SAP Logon isn't running
  *                             (default C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe)
@@ -255,6 +287,7 @@ export const sapGuiTest = uiTest.extend<
       const connection = new SapConnection({ sapGuiMode, sapGuiTransport, sapGuiReuse });
       await use(connection);
       await connection.dispose();
+      await connection.releaseHost();
     },
     { scope: 'worker' },
   ],

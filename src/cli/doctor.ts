@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { loadEnv } from '@automation/referenced-automation-utils';
 import { BRIDGE_SCRIPT } from '../gui/bridgeScript';
+import { selectedTransport } from '../gui/transportFactory';
 import { formatConformance, runConformance } from '../gui/conformance';
 import { dumpScreen, formatScreenDump } from '../gui/inspect';
 import { connectForCli, type CliConnection } from './connect';
@@ -27,13 +28,16 @@ async function main(): Promise<void> {
 
   const env = loadEnv();
   const simulate = env.getBoolean('SAP_GUI_SIMULATOR', false);
+  const remoteHost = !simulate && selectedTransport() === 'remote';
   out(
-    simulate || process.platform === 'win32',
+    simulate || remoteHost || process.platform === 'win32',
     simulate
       ? 'using the built-in simulator (SAP_GUI_SIMULATOR=true)'
-      : `running on Windows (found: ${process.platform})`,
+      : remoteHost
+        ? `using SAP GUI on the remote desktop host (SAP_GUI_TRANSPORT=remote; this machine: ${process.platform})`
+        : `running on Windows (found: ${process.platform})`,
   );
-  if (!simulate && process.platform !== 'win32') process.exit(1);
+  if (!simulate && !remoteHost && process.platform !== 'win32') process.exit(1);
 
   let connection: CliConnection;
   const mode = simulate ? 'attach' : env.get('SAP_GUI_MODE', 'attach');
@@ -54,7 +58,7 @@ async function main(): Promise<void> {
     process.stdout.write(
       [
         '       Check, in order:',
-        '        1. the bridge: script execution blocked by policy? try SAP_GUI_POWERSHELL=<path to powershell.exe>, an approved signed copy of the bridge (SAP_GUI_POWERSHELL_SCRIPT_DIR), or the Java/JACOB bridge (SAP_GUI_TRANSPORT=java, see docs)',
+        '        1. the bridge: script execution blocked by policy? try SAP_GUI_POWERSHELL=<path to powershell.exe>, an approved signed copy of the bridge (SAP_GUI_POWERSHELL_SCRIPT_DIR), or the Java/JACOB bridge (SAP_GUI_TRANSPORT=java, see docs); with SAP_GUI_TRANSPORT=remote: the RDP session must be connected and unlocked and REMOTE_ALLOW must include sap (automation-remote check)',
         '        2. attach mode: SAP Logon is open with a connection and a session.  open mode: SAP_GUI_CONNECTION_NAME matches a SAP Logon entry exactly',
         '        3. SAP GUI > Options > Accessibility & Scripting > Scripting: "Enable scripting" is ticked, and both "Notify when a script attaches / opens a connection" are UNticked (those popups stall a run)',
         '        4. The SAP server allows it: profile parameter sapgui/user_scripting = TRUE (ask your SAP Basis team)',
@@ -93,7 +97,7 @@ async function main(): Promise<void> {
     }
 
     if (process.argv.includes('--conformance')) {
-      process.stdout.write('\nTransport conformance:\n\n');
+      process.stdout.write(`\nTransport conformance (${connection.transportName}):\n\n`);
       const report = await runConformance(connection.transport, {
         write: process.argv.includes('--write'),
       });

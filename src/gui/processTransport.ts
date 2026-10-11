@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as readline from 'node:readline';
 import { getLogger } from '@automation/referenced-automation-utils';
+import { decodeLine, encodeRequest } from './bridgeProtocol';
 import { SapGuiTransportError, type SapGuiCommand, type SapGuiTransport } from './types';
 
 export interface ProcessTransportOptions {
@@ -130,16 +131,14 @@ export class ProcessTransport implements SapGuiTransport {
   }
 
   private onLine(line: string, ready: { resolve: () => void }): void {
-    let message: { rid: number; ok: boolean; value?: unknown; error?: string; code?: string };
-    try {
-      message = JSON.parse(line);
-    } catch {
+    const message = decodeLine(line);
+    if (message.kind === 'junk') {
       this.log.warn(
         `ignoring non-JSON line from the ${this.options.label} bridge: ${line.slice(0, 200)}`,
       );
       return;
     }
-    if (message.rid === 0) {
+    if (message.kind === 'ready') {
       ready.resolve();
       return;
     }
@@ -147,14 +146,8 @@ export class ProcessTransport implements SapGuiTransport {
     if (!pending) return;
     this.pending.delete(message.rid);
     clearTimeout(pending.timer);
-    if (message.ok) pending.resolve(message.value ?? null);
-    else
-      pending.reject(
-        new SapGuiTransportError(
-          message.error ?? 'unknown bridge error',
-          message.code === 'NOT_FOUND' || message.code === 'SESSION_LOST' ? message.code : 'ERROR',
-        ),
-      );
+    if (message.ok) pending.resolve(message.value);
+    else pending.reject(message.error);
   }
 
   private onExit(code: number | null, ready: { reject: (error: Error) => void }): void {
@@ -230,7 +223,7 @@ export class ProcessTransport implements SapGuiTransport {
       }, timeoutMs);
       this.pending.set(rid, { resolve, reject, timer, command: command.op });
       try {
-        this.child.stdin.write(`${JSON.stringify({ rid, ...command })}\n`, (error) => {
+        this.child.stdin.write(`${encodeRequest(rid, command)}\n`, (error) => {
           if (error)
             this.stop(
               new SapGuiTransportError(

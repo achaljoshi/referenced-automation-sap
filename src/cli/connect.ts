@@ -1,6 +1,6 @@
 import { loadEnv } from '@automation/referenced-automation-utils';
 import { createSampleSapSystem } from '../gui/fakeSapGui';
-import { startRealTransport } from '../gui/transportFactory';
+import { selectedTransport, startRealTransport } from '../gui/transportFactory';
 import { SapGuiSession } from '../gui/session';
 import type { SapGuiTransport } from '../gui/types';
 
@@ -20,12 +20,13 @@ export interface CliConnection {
 export async function connectForCli(timeoutMs = 15_000): Promise<CliConnection> {
   const env = loadEnv();
   const simulate = env.getBoolean('SAP_GUI_SIMULATOR', false);
-  if (!simulate && process.platform !== 'win32') {
+  // With SAP_GUI_TRANSPORT=remote SAP GUI is on the remote desktop host; the remote layer reports an unsupported test machine itself.
+  if (!simulate && process.platform !== 'win32' && selectedTransport() !== 'remote') {
     throw new Error(
-      'SAP GUI Scripting is a Windows COM API: run this on the Windows machine that has SAP GUI (or set SAP_GUI_SIMULATOR=true to try it against the built-in fake SAP).',
+      'SAP GUI Scripting is a Windows COM API: run this on the Windows machine that has SAP GUI (or set SAP_GUI_SIMULATOR=true to try it against the built-in fake SAP, or SAP_GUI_TRANSPORT=remote to use SAP GUI on a remote desktop host).',
     );
   }
-  const started = simulate
+  const started: { transport: SapGuiTransport; name: string; release?: () => Promise<void> } = simulate
     ? {
         transport: createSampleSapSystem({ transitionDelayMs: 0 }) as SapGuiTransport,
         name: 'simulator',
@@ -53,10 +54,14 @@ export async function connectForCli(timeoutMs = 15_000): Promise<CliConnection> 
       session,
       transport,
       transportName: started.name,
-      close: () => transport.close(),
+      close: async () => {
+        await transport.close();
+        await started.release?.(); // the remote host too: a CLI run is the only user
+      },
     };
   } catch (error) {
     await transport.close().catch(() => undefined);
+    await started.release?.().catch(() => undefined);
     throw error;
   }
 }

@@ -44,6 +44,7 @@ if (process.env.BRIDGE_CLOSE_STDIN) {
 }
 
 readline.createInterface({ input: process.stdin }).on('line', async (line) => {
+  if (line.trim().length === 0) return; // like the PowerShell bridge: a blank line is ignored (the remote transport sends one to read the ready line)
   const { rid, ...command } = JSON.parse(line);
   if (process.env.BRIDGE_CRASH_OP === command.op) {
     process.stderr.write(`stand-in bridge crashed on ${command.op}\n`);

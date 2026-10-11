@@ -4,7 +4,7 @@ An alternative to the PowerShell bridge, for machines where PowerShell is restri
 
 ## Build
 
-You need a JDK (8 or later) and the JACOB jar your Java framework uses.
+You need a JDK (8 or later; `javac` and `jar` on PATH) and the JACOB **binary** jar your Java framework uses (for example `jacob-1.18.jar`, not `jacob-1.18-sources.jar`).
 
 ```bash
 cd bridge/jacob

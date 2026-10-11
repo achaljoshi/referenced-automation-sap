@@ -281,8 +281,15 @@ SAP GUI Scripting is a Windows COM API: **tests that drive real SAP must run on 
 | `SAP_GUI_SIMULATOR` | `true` = use the built-in fake SAP (what `npm run try:simulator` sets) | `false` |
 | `SAP_SAMPLE_TCODE` | transaction used by sample test 02 | `SU3` |
 | `SAP_RUN_TEMPLATES` | `true` = also run the `...TEMPLATE` tests against a real SAP | `false` |
+| `SAP_GUI_TRANSPORT` | `powershell` (default), `java`, or `remote` (the bridge runs on a remote desktop host, see below) | `powershell` |
 | `SAP_GUI_POWERSHELL` | path to `powershell.exe` (a 32-bit SAP GUI needs `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`) | `powershell.exe` |
 | `SAP_USER`, `SAP_PASSWORD`, `SAP_CLIENT`, `SAP_LANGUAGE` | read by converted logon steps - put them in `.env.<name>` (not committed) or CI variables | |
+
+### SAP GUI on a remote desktop host
+
+When SAP GUI is installed only on a remote Windows desktop host that you reach by RDP, set `SAP_GUI_TRANSPORT=remote`: the PowerShell bridge then runs on that host (inside the logged-in RDP session, the only place SAP GUI scripting can see) through the remote agent of `@automation/referenced-automation-utils`, while the UI steps of the same test keep running in the browser on the test machine. It is attach mode with exactly one worker; the RDP session must stay connected and unlocked. Setup, the `REMOTE_*` keys, a mixed UI + SAP test and troubleshooting: [`docs/SAP_GUI_GUIDE.md`](docs/SAP_GUI_GUIDE.md#sap-gui-on-a-remote-desktop-host).
+
+> **NOT VERIFIED on a real RDP host with real SAP GUI:** it was tested only against the utils stand-in agent and this repo's stand-in bridge. Treat the first run on the real host as the verification (`automation-remote check`, then `npm run doctor -- --conformance`).
 
 ### Try it without SAP
 

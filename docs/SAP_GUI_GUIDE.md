@@ -60,7 +60,7 @@ Settings come from `.env.<name>` (committed, **no secrets**), overridden by `.en
 | `SAP_GUI_CONNECTION_STRING` | open a system by connection string instead of a SAP Logon entry (`open` mode) | |
 | `SAP_GUI_TIMEOUT_MS` | longest any single step waits | `30000` |
 | `SAP_GUI_ROUNDTRIP_WAIT_MS` | after an action that should reach the server, how long to wait for the server's answer (round-trip counter / screen change) before asking whether SAP is idle; also the quiet period for actions that never reach it. `0` = the old "idle twice" check. Raise it on a slow link | `250` |
-| `SAP_GUI_TRANSPORT` | `powershell` (default) or `java` (the Java/JACOB helper in `bridge/jacob`, with `SAP_GUI_BRIDGE_JAR`, `SAP_GUI_JACOB_JAR`, `SAP_GUI_JACOB_DLL`, `SAP_GUI_JAVA`) | `powershell` |
+| `SAP_GUI_TRANSPORT` | `powershell` (default), `java` (the Java/JACOB helper in `bridge/jacob`, with `SAP_GUI_BRIDGE_JAR`, `SAP_GUI_JACOB_JAR`, `SAP_GUI_JACOB_DLL`, `SAP_GUI_JAVA`) or `remote` (the PowerShell bridge on a remote desktop host - see [SAP GUI on a remote desktop host](#sap-gui-on-a-remote-desktop-host); `SAP_GUI_REMOTE_BRIDGE_FILE` optional) | `powershell` |
 | `SAP_USER_POOL` | comma list of users leased one per worker (open mode); `SAP_PASSWORD_<USER>` per user; `SAP_GUI_POOL_TIMEOUT_MS`, `SAP_GUI_POOL_DIR` | |
 | `SAP_GUI_FALLBACKS` | `report` / `fail` / `off` - what to do when a locator fallback is used | `report` |
 | `SAP_GUI_CLEANUP` | `off` keeps the data tests created | on |
@@ -223,6 +223,60 @@ Cleanups run after the test - pass or fail, after every retry, newest first, one
 ### Run workers in parallel without "already logged on"
 `SAP_USER_POOL=U1,U2,U3` (with `SAP_GUI_MODE=open`): each worker leases a distinct user (exclusive across processes on one machine, with a heartbeat and recovery from crashed runs) and `logon()` uses its own `SAP_PASSWORD_<USER>` or the shared `SAP_PASSWORD`. A file lock cannot coordinate several CI machines using the same users; give each machine its own users.
 
+### SAP GUI on a remote desktop host
+
+> **NOT VERIFIED on a real RDP host with real SAP GUI:** it was tested only against the utils stand-in agent and this repo's stand-in bridge. The Windows pieces (the PowerShell agent, `mstsc`, the real bridge on the host) have never run here; see [Verified / NOT verified](#9-what-has-and-has-not-been-verified).
+
+**The picture - three hops.** Your laptop is only a window onto an AWS WorkSpace. The WorkSpace is the test machine: it runs Playwright and the browser that drives the UI app. SAP GUI is installed only on a remote Windows desktop host, reachable from the WorkSpace by RDP (port 3389) and nothing else. The utils remote client on the WorkSpace opens that RDP session and exchanges request files with an agent running inside it; the agent starts the SAP bridge there, because SAP GUI scripting only sees the **interactive** desktop session.
+
+```
+laptop  --(WorkSpaces display)-->  AWS WorkSpace: Playwright + browser (UI steps)
+                                          |  SAP_GUI_TRANSPORT=remote: RemoteTransport -> RemoteHost client
+                                          '--(nested RDP, drive-mailbox)-->  RDP host: agent -> PowerShell bridge -> SAP GUI
+```
+
+**Settings** (`.env.<name>`; secrets only in `.env.<name>.local`):
+
+| Key | Meaning |
+|---|---|
+| `SAP_GUI_TRANSPORT=remote` | run the bridge on the remote host (attach mode; the session on the host is already logged on) |
+| `REMOTE_ENABLED=true`, `REMOTE_RDP_HOST`, `REMOTE_RDP_USER`, `REMOTE_RDP_PASSWORD`, `REMOTE_ALLOW` (must include `sap`), `REMOTE_AGENT_START`, timeouts ... | the remote host itself - every key is in `../referenced-automation-utils/docs/REMOTE_DESKTOP.md` |
+| `SAP_GUI_REMOTE_BRIDGE_FILE` | optional: path **on the remote host** of an approved/signed bridge script, run instead of the script text this package sends |
+| `SAP_GUI_CONNECTION_INDEX`, `SAP_GUI_SESSION_INDEX`, `SAP_GUI_TIMEOUT_MS` ... | unchanged; they apply to SAP on the host |
+
+Always one worker: there is one interactive desktop and the agent answers one request at a time. `playwright.config.ts` sets `workers: 1` for the remote transport (also with `SAP_GUI_MODE=open`), and the `sap` fixture refuses more than one worker.
+
+**One test, UI steps and SAP steps.** The `sap` fixture and the ui package's `page` fixture live in the same `test`:
+
+```ts
+import { sapGuiTest as test } from '@automation/referenced-automation-sap';
+
+test('order created in the UI shows up in SAP', async ({ page, sap }) => {
+  await page.goto('/orders/new');                       // local: browser on the WorkSpace
+  await page.getByRole('button', { name: 'Submit' }).click();
+  const number = await page.getByTestId('order-number').innerText();
+  await sap.setText('wnd[0]/tbar[0]/okcd', '/nVA03');   // remote: SAP GUI on the RDP host
+  await sap.sendVKey(0);
+  await sap.setText('wnd[0]/usr/ctxtVBAK-VBELN', number);
+});
+```
+
+**Lifecycle.** The first test that needs SAP connects the remote host (opening the RDP session unless it is already up), starts the bridge there and attaches; `SAP_GUI_REUSE=worker` keeps that bridge for the worker's tests. When a test fails because the bridge or agent is gone, the health check notices (`ping` fails) and the next test reconnects through a fresh host. At the end of the worker the bridge process is stopped and this worker's use of the remote host is released (the last process out closes the session, per the utils rules). `npm run doctor -- --conformance` does the same for one run and prints which transport it ran.
+
+**Requirements.** The RDP session on the host must stay **connected and unlocked** while tests run (a locked or disconnected session cannot be scripted; minimising the window is fine), and the tests must be started from an interactive logged-in desktop on the WorkSpace (`mstsc` needs one). Keep the WorkSpace session connected too.
+
+**Troubleshooting.**
+
+| You see | Likely cause | Do this |
+|---|---|---|
+| `SAP_GUI_TRANSPORT=remote needs the remote desktop host: set REMOTE_ENABLED=true` | the REMOTE_* settings are missing | set them (utils `docs/REMOTE_DESKTOP.md`); run `automation-remote doctor` |
+| `... refused to start the SAP GUI bridge ... REMOTE_ALLOW must include "sap"` | `REMOTE_ALLOW` lacks `sap` | `REMOTE_ALLOW=http,db,sap` (do not add `exec` unless you need it) |
+| `the remote desktop host's agent stopped answering` (`SESSION_LOST`) | the RDP window was closed, the session locked/disconnected/logged off, or the agent crashed | keep the session connected and unlocked; check the host's session time limits and `agent/agent.log` in the mailbox folder; the next test reconnects |
+| `no reply to "..." within 60000ms ... the remote bridge was stopped` | SAP GUI shows a dialog that blocks scripting, or the agent is busy | look at the host's screen; later calls fail at once by design |
+| `... did not become ready` | PowerShell is blocked on the host, or the session is not interactive | `automation-remote check`; try `SAP_GUI_REMOTE_BRIDGE_FILE` with an approved copy |
+| `SAP_GUI_TRANSPORT=remote with 2 workers` | `--workers` / `WORKERS` above 1 | run with one worker |
+| attaches but nothing is found | SAP Logon on the host is not open/logged on in the interactive session | log on in the RDP session first (attach mode) |
+
 ### Gherkin features (`playwright-bdd` 9.2.1)
 
 The same SAP can be driven from business-readable features. The vocabulary is in the package (`registerSapSteps`), so every project says it the same way; the sample features in `features/` run against the simulator.
@@ -326,7 +380,7 @@ On any failure the report attaches the status bar text and a screenshot of the S
 
 Verified, on macOS without SAP: the parser and generator (including a realistic VA01 recording), the session's waiting and error messages against a simulator with screen-change latency, the logon helper's failure paths, password handling (not in specs, not in logs), the CLI, screen inspection, the sample tests against the simulator, and that the bridge script is ASCII-only and its only `Start-Process` is the SAP Logon launch.
 
-**Not verified until run on Windows with SAP GUI:** the PowerShell bridge itself, SAP Logon auto-start, COM behaviour on your SAP release, and that any particular recording replays on your system. Run `npm run doctor` first, then one real recording, and treat anything the doctor or a failure message does not explain as a bug to report.
+**Not verified until run on Windows with SAP GUI:** the PowerShell bridge itself, **the whole remote-desktop path (`SAP_GUI_TRANSPORT=remote`: tested only against the utils stand-in agent and the stand-in bridge - never on a real RDP host, agent or SAP GUI; in particular that the real agent hands over the bridge's ready line when sent a blank line, which the transport relies on)**, SAP Logon auto-start, COM behaviour on your SAP release, and that any particular recording replays on your system. Run `npm run doctor` first, then one real recording, and treat anything the doctor or a failure message does not explain as a bug to report.
 
 ## 10. Limits
 

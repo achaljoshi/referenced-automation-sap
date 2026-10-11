@@ -19,11 +19,13 @@ const bddTestDir = defineBddConfig({
 // with more than one worker, so `--workers=4` on the command line fails loudly instead of corrupting a run.
 // (The npm scripts that only use the simulator, test:framework and test:bdd, pass --workers themselves.)
 const env = loadEnv({ dir: __dirname });
-const ownSessionPerWorker = env.getBoolean('SAP_GUI_SIMULATOR', false) || env.get('SAP_GUI_MODE', 'attach') === 'open';
+// SAP_GUI_TRANSPORT=remote is always one worker: one interactive RDP desktop, one agent answering one request at a time.
+const remoteDesktop = env.get('SAP_GUI_TRANSPORT', 'powershell').toLowerCase() === 'remote';
+const ownSessionPerWorker = env.getBoolean('SAP_GUI_SIMULATOR', false) || (env.get('SAP_GUI_MODE', 'attach') === 'open' && !remoteDesktop);
 const requestedWorkers = env.getOptional('WORKERS');
 if (!ownSessionPerWorker && requestedWorkers && requestedWorkers !== '1' && process.env.TEST_WORKER_INDEX === undefined) {
   console.warn(
-    `[sap] WORKERS=${requestedWorkers} ignored: SAP_GUI_MODE=attach would put every worker in the same SAP window. ` +
+    `[sap] WORKERS=${requestedWorkers} ignored: SAP_GUI_MODE=attach (or SAP_GUI_TRANSPORT=remote) would put every worker in the same SAP window. ` +
       'Using 1 worker. (SAP_GUI_SIMULATOR=true or SAP_GUI_MODE=open with SAP_USER_POOL allow parallel workers.)',
   );
 }
