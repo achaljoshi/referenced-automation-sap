@@ -1,5 +1,17 @@
 import { loadEnv } from '@automation/referenced-automation-utils';
 import { AdapterError } from '@automation/referenced-automation-utils';
+import {
+  activeLogonCooldown,
+  clearLogonFailure,
+  isLockRisk,
+  logonCooldownMinutes,
+  logonFailureMessage,
+  logonMarkerDir,
+  logonMarkerPath,
+  readLogonFailure,
+  SapLogonCooldownError,
+  writeLogonFailure,
+} from './logonGuard';
 import { resolveSecret } from './secrets';
 import type { SapGuiSession } from './session';
 
@@ -16,6 +28,13 @@ export interface SapCredentials {
    * Default can be set with SAP_MULTIPLE_LOGON=continue|fail.
    */
   onMultipleLogon?: 'continue' | 'fail';
+  /**
+   * Minutes to refuse the same client + user + password after SAP rejected it, so that a retry cannot lock the user.
+   * Default SAP_LOGON_FAILURE_COOLDOWN_MIN (15); 0 turns the protection off.
+   */
+  cooldownMinutes?: number;
+  /** Folder of the logon-failure marker. Default SAP_GUI_LOGON_MARKER_DIR (`.sap-state`). */
+  markerDir?: string;
 }
 
 const LOGON_USER_FIELD = 'wnd[0]/usr/txtRSYST-BNAME';
@@ -39,7 +58,14 @@ export async function isOnLogonScreen(sap: SapGuiSession): Promise<boolean> {
  *
  * Fails with a clear message if SAP does not leave the logon screen (wrong
  * password, locked user) or shows a pop-up (e.g. "user already logged on
- * in another session"), instead of letting the next step time out.
+ * in another session"), instead of letting the next step time out. The message
+ * keeps SAP's own status text and says what to check.
+ *
+ * Lockout protection: when SAP rejects the name or password (or says the user
+ * is locked) a marker is written, and the same client + user + password is
+ * refused - without touching SAP - for SAP_LOGON_FAILURE_COOLDOWN_MIN minutes
+ * (default 15; see logonGuard.ts). A changed password, user or client clears
+ * the stop by itself; a successful logon removes the marker.
  */
 export async function logon(sap: SapGuiSession, credentials: SapCredentials = {}): Promise<void> {
   const env = loadEnv();
@@ -58,6 +84,11 @@ export async function logon(sap: SapGuiSession, credentials: SapCredentials = {}
         `currently SAP_USER is ${user ? 'set' : 'EMPTY'} and SAP_PASSWORD is ${password ? 'set' : 'EMPTY'}.`,
     );
   }
+  const cooldownMinutes = credentials.cooldownMinutes ?? logonCooldownMinutes();
+  const markerDir = credentials.markerDir ?? logonMarkerDir();
+  const stop = activeLogonCooldown({ client, user, password }, cooldownMinutes, markerDir);
+  if (stop) throw new SapLogonCooldownError(stop.marker, stop.remainingMs, logonMarkerPath(markerDir), cooldownMinutes);
+
   if (client) await sap.setText(LOGON_CLIENT_FIELD, client);
   await sap.setText(LOGON_USER_FIELD, user);
   await sap.setText(LOGON_PASSWORD_FIELD, password);
@@ -81,8 +112,17 @@ export async function logon(sap: SapGuiSession, credentials: SapCredentials = {}
   }
   if (await isOnLogonScreen(sap)) {
     const status = await sap.statusBarText();
-    throw new AdapterError('sap-gui', 'logon', `still on the logon screen after sending Enter. Status bar: "${status || '(empty)'}"`);
+    const markerFile =
+      cooldownMinutes > 0 && isLockRisk(status) ? writeLogonFailure({ client, user, password, status }, markerDir) : undefined;
+    throw new AdapterError(
+      'sap-gui',
+      'logon',
+      logonFailureMessage(status, { client, user, passwordLength: password.length }, { cooldownMinutes, markerFile }),
+    );
   }
+  // Logged on: whatever an earlier failure for this user said no longer applies.
+  const earlier = readLogonFailure(markerDir);
+  if (earlier && earlier.client === (client ?? '') && earlier.user.toUpperCase() === user.toUpperCase()) clearLogonFailure(markerDir);
 }
 
 /**

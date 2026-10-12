@@ -1,4 +1,4 @@
-import { identifier, quote } from './names';
+import { COMMAND_FIELD, identifier, quote } from './names';
 import { Objects } from './objects';
 import { parseVbs, type Expr, type ParseWarning, type Step } from './parser';
 import { protectSecrets, secretEnvVarForId } from './secrets';
@@ -44,13 +44,39 @@ export const VALUE_PROPS = new Set(['text', 'value', 'key']);
 export const NO_ASSERTION_TODO =
   'TODO(converter): no assertion - this test only performs the recorded actions, so it passes whenever SAP does not throw.';
 
-/** The last lines of a generated test body: a real assertion if the caller supplied one, else the TODO and (by default) a guard that fails until it is replaced. */
-export function assertionLines(options: { expectStatus?: string; noAssertion?: 'fail' | 'todo' }): string[] {
-  if (options.expectStatus !== undefined)
-    return [`await expect(sap).toHaveStatusMessage(${statusPattern(options.expectStatus)});`];
+/** The assertions a caller can ask the converter to write. */
+export interface AssertionOptions {
+  /** A regular expression the status bar must match at the end. */
+  expectStatus?: string;
+  /** Texts that must be on the screen at the end (each becomes `getByText(...).first()` + `toExist()`). */
+  expectText?: string[];
+  /** A regular expression the main window's title must match at the end. */
+  expectTitle?: string;
+  /** What to emit when there is no assertion: 'fail' (default) a guard that throws, 'todo' only the comment. */
+  noAssertion?: 'fail' | 'todo';
+}
+
+/** True when the caller asked for at least one assertion (status bar, text on the screen or window title): the TODO and the failing guard are then left out. */
+export function hasAssertion(options: AssertionOptions): boolean {
+  return options.expectStatus !== undefined || options.expectTitle !== undefined || (options.expectText?.length ?? 0) > 0;
+}
+
+/**
+ * The last lines of a generated test body: the assertions the caller supplied (text on the screen, title, status bar - in that
+ * order), else the TODO and (by default) a guard that fails until it is replaced.
+ */
+export function assertionLines(options: AssertionOptions): string[] {
+  if (hasAssertion(options))
+    return [
+      ...(options.expectText ?? []).map((text) => `await expect(sap.getByText(${quote(text)}).first()).toExist();`),
+      ...(options.expectTitle !== undefined ? [`await expect(sap).toHaveTitle(${pattern(options.expectTitle)});`] : []),
+      ...(options.expectStatus !== undefined ? [`await expect(sap).toHaveStatusMessage(${pattern(options.expectStatus)});`] : []),
+    ];
   return [
     `// ${NO_ASSERTION_TODO}`,
-    '// Add a check of the business result, e.g.  await expect(sap).toHaveStatusMessage(/has been saved/i, { type: \'S\' });',
+    "// Add a check of the business result, e.g.  await expect(sap.getByText('Order saved').first()).toExist();  or  await expect(sap).toHaveStatusMessage(/has been saved/i, { type: 'S' });",
+    '// (the converter can write one for you: --expect-text, --expect-title, --expect-status).',
+    'void expect; // delete this line once you use expect(...) - it only keeps the import of expect from being reported as unused',
     ...(options.noAssertion === 'todo'
       ? []
       : [
@@ -60,22 +86,86 @@ export function assertionLines(options: { expectStatus?: string; noAssertion?: '
   ];
 }
 
-function statusPattern(source: string): string {
-  new RegExp(source); // throws a clear SyntaxError for a bad pattern, at conversion time
+/** A source regular expression as a case-insensitive literal; throws a clear SyntaxError for a bad pattern, at conversion time. */
+function pattern(source: string): string {
+  new RegExp(source);
   return source.includes('/') ? `new RegExp(${quote(source)}, 'i')` : `/${source}/i`;
 }
 
-export interface GenerateOptions {
-  /**
-   * A regular expression the status bar must match at the end of the test: becomes the test's assertion
-   * (`expect(sap).toHaveStatusMessage(...)`). Without it the test has NO assertion: it ends with a TODO and, unless
-   * `noAssertion: 'todo'`, a guard that fails the test until a human adds one.
-   */
-  expectStatus?: string;
-  /** What to emit when there is no assertion: 'fail' (default) a guard that throws, 'todo' only the comment. */
-  noAssertion?: 'fail' | 'todo';
-  /** Module the generated spec imports `sapExpect` (the SAP assertions) from. Default: the published package. Only used with `expectStatus`. */
+/** What the test body's first lines tell about how the recording starts. */
+export type SessionFixture = 'sap' | 'loggedInSap';
+
+const LOGON_FIELD = /RSYST-(MANDT|BNAME|BCODE|LANGU)$/i;
+const PASSWORD_FIELD = /(^|\/)pwd[^/]*$/i;
+
+/**
+ * Does the recording log on? It does when it types into the logon screen's fields (client, user, password, language) or into a
+ * password field before the first command-field entry / transaction start (a password changed later, inside SAP, is not a logon).
+ * Returns the line of the first logon step.
+ */
+export function logonStepLine(steps: Step[]): number | undefined {
+  let insideSap = false;
+  for (const step of steps) {
+    if (step.kind === 'call' && step.id === '' && step.method.toLowerCase() === 'starttransaction') insideSap = true;
+    if (!('id' in step)) continue;
+    const id = step.id.replace(/^\/app\/con\[\d+\]\/ses\[\d+\]\//i, '');
+    if (id === COMMAND_FIELD) insideSap = true;
+    if (LOGON_FIELD.test(id) || (!insideSap && PASSWORD_FIELD.test(id))) return step.line;
+  }
+  return undefined;
+}
+
+/**
+ * Which session fixture the generated test asks for. `sap` only opens the connection (SAP_GUI_MODE=open lands on the logon screen,
+ * attach mode on whatever is open) so a recording that contains the logon needs it; `loggedInSap` logs on first when SAP shows the
+ * logon screen and leaves an already logged-on session alone, so a recording made inside SAP needs that one. `auto` decides by
+ * looking for logon steps.
+ */
+export function chooseFixture(
+  steps: Step[],
+  wanted: SessionFixture | 'auto' | undefined,
+): { fixture: SessionFixture; warnings: ParseWarning[] } {
+  const logon = logonStepLine(steps);
+  if (wanted === undefined || wanted === 'auto') return { fixture: logon === undefined ? 'loggedInSap' : 'sap', warnings: [] };
+  if (wanted === 'loggedInSap' && logon !== undefined)
+    return {
+      fixture: wanted,
+      warnings: [
+        {
+          line: logon,
+          message:
+            '--fixture loggedInSap, but the recording logs on itself: the test logs on first, so these logon steps will not find the logon screen. Remove them or use --fixture sap (or auto).',
+        },
+      ],
+    };
+  return { fixture: wanted, warnings: [] };
+}
+
+/** The destructured fixture argument of the generated test; the body always calls the session `sap`. */
+export function fixtureArg(fixture: SessionFixture): string {
+  return fixture === 'sap' ? '{ sap }' : '{ loggedInSap: sap }';
+}
+
+/** The header line that says how the test gets its session, so a reader knows where the logon comes from. */
+export function fixtureNote(fixture: SessionFixture, wanted: SessionFixture | 'auto' | undefined): string {
+  const automatic = wanted === undefined || wanted === 'auto';
+  return fixture === 'loggedInSap'
+    ? ` *  - session: loggedInSap (${automatic ? 'the recording has no logon steps' : '--fixture loggedInSap'}): the fixture logs on with SAP_USER / SAP_PASSWORD / SAP_CLIENT / SAP_LANGUAGE when SAP shows the logon screen and leaves an already logged-on session alone`
+    : ` *  - session: sap (${automatic ? 'the recording contains the logon' : '--fixture sap'}): the test starts on whatever the connection shows - the logon screen with SAP_GUI_MODE=open; in attach mode be on the logon screen too`;
+}
+
+export interface GenerateOptions extends AssertionOptions {
+  // Assertions (from AssertionOptions): `expectStatus` the status bar message, `expectText` texts on the screen, `expectTitle` the window
+  // title - any combination. Without any the test has NO assertion: it ends with a TODO and, unless `noAssertion: 'todo'`, a guard that
+  // fails the test until a human adds one.
+  /** Module the generated spec imports `sapExpect` (the SAP assertions) from - always imported, so an assertion added by hand works. Default: the published package. */
   expectImport?: string;
+  /**
+   * Which session fixture the test uses: `sap` (only opens the connection - for a recording that starts at the logon screen),
+   * `loggedInSap` (logs on first unless already logged on - for a recording made inside SAP) or `auto` (default): `sap` when the
+   * recording contains the logon steps, `loggedInSap` when it does not.
+   */
+  fixture?: SessionFixture | 'auto';
   /** Test title. */
   testName: string;
   /** Shown in the header comment, e.g. 'recordings/va01.vbs'. */
@@ -111,6 +201,8 @@ export interface Generated {
   warnings: ParseWarning[];
   /** The environment variables the generated test reads. */
   envVars: string[];
+  /** The session fixture the test asks for. */
+  fixture: SessionFixture;
 }
 
 export function renderExpr(expr: Expr): string {
@@ -142,6 +234,8 @@ export function generateFromSteps(recorded: Step[], parseWarnings: ParseWarning[
   const steps = protectedSteps.steps;
   warnings.push(...protectedSteps.warnings.map((w) => ({ ...w, severity: 'info' as const })));
   for (const name of protectedSteps.envVars) envVars.add(name);
+  const chosen = chooseFixture(recorded, options.fixture);
+  warnings.push(...chosen.warnings);
   const declared = new Set<string>();
   const stripPrefix = options.stripSessionPrefix ?? true;
   const lineComments = options.lineComments ?? true;
@@ -255,8 +349,9 @@ export function generateFromSteps(recorded: Step[], parseWarnings: ParseWarning[
     ` * Converted from ${options.sourceName ?? 'a SAP GUI Scripting recording'} by sap-vbs-to-playwright.`,
     ' * Review before committing:',
     ...(usesEnv ? [` *  - reads ${[...envVars].join(', ')} from the environment (.env.<name> / CI variables); none of those values is stored here`] : []),
+    fixtureNote(chosen.fixture, options.fixture),
     ' *  - no waits are needed: every step waits for SAP to be idle and for its element to exist',
-    ...(options.expectStatus === undefined
+    ...(!hasAssertion(options)
       ? [` *  - NO ASSERTION: ${NO_ASSERTION_TODO.replace('TODO(converter): no assertion - ', '')} ${options.noAssertion === 'todo' ? 'Add one.' : 'It ends with a guard that fails until you add one.'}`]
       : []),
     ...warnings.map((w) => ` *  - line ${w.line}: ${w.message}`),
@@ -265,19 +360,19 @@ export function generateFromSteps(recorded: Step[], parseWarnings: ParseWarning[
   const assertion = assertionLines(options);
   const code = [
     `import { sapGuiTest as test } from ${quote(options.testImport ?? '@automation/referenced-automation-sap')};`,
-    ...(options.expectStatus !== undefined ? [`import { sapExpect as expect } from ${quote(options.expectImport ?? '@automation/referenced-automation-sap')};`] : []),
+    `import { sapExpect as expect } from ${quote(options.expectImport ?? '@automation/referenced-automation-sap')};`,
     ...(usesEnv ? ["import { loadEnv } from '@automation/referenced-automation-utils';", '', 'const env = loadEnv();'] : []),
     '',
     ...preamble,
     ...header,
-    `test(${quote(`${options.testName} ${tag}`.trim())}, async ({ sap }) => {`,
+    `test(${quote(`${options.testName} ${tag}`.trim())}, async (${fixtureArg(chosen.fixture)}) => {`,
     ...body.map((line) => `  ${line}`),
     ...assertion.map((line) => `  ${line}`),
     '});',
     '',
   ].join('\n');
 
-  return { code, body, preamble, warnings, envVars: [...envVars] };
+  return { code, body, preamble, warnings, envVars: [...envVars], fixture: chosen.fixture };
 }
 
 /** VBScript recording in, Playwright spec out. */

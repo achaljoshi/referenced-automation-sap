@@ -2,7 +2,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { csvUtils } from '@automation/referenced-automation-utils';
-import { convertToPageObjects, convertVbs, decodeRecording, type ParamRule } from '../vbs';
+import { convertToPageObjects, convertVbs, decodeRecording, hasAssertion, type ParamRule } from '../vbs';
 
 const USAGE = `sap-vbs-to-playwright - turn SAP GUI Scripting recordings (.vbs) into Playwright tests
 
@@ -29,10 +29,19 @@ Options:
   --data                  Make every literal typed in the recording a column of <name>.data.csv and run one test per row
                           (implies --page-objects). The first row holds the values that were recorded.
   --sap-import <module>   Module the page objects import SapPage from. Default: @automation/referenced-automation-sap.
-  --expect-status <regex> The test's assertion: at the end the status bar must match this (case-insensitive), e.g. "has been saved".
-                          Without it a converted test has NO assertion (a recording only performs actions): it ends with a
-                          TODO and a guard that FAILS the test until you add one.
-  --expect-import <mod>   Module the spec imports the SAP assertions (sapExpect) from with --expect-status. Default: @automation/referenced-automation-sap.
+  --expect-status <regex> An assertion: at the end the status bar must match this (case-insensitive), e.g. "has been saved".
+  --expect-text <text>    An assertion: at the end this text must be on the screen (a label, button, tab ...), written as
+                          await expect(sap.getByText('<text>').first()).toExist();  Repeatable.
+  --expect-title <regex>  An assertion: at the end the main window's title must match this (case-insensitive), e.g. "Standard Order".
+                          Use any combination of --expect-status, --expect-text and --expect-title. Without any, a converted test
+                          has NO assertion (a recording only performs actions): it ends with a TODO and a guard that FAILS the
+                          test until you add one.
+  --expect-import <mod>   Module the spec imports the SAP assertions (sapExpect, imported as expect) from - always imported, so an
+                          assertion you add by hand works. Default: @automation/referenced-automation-sap.
+  --fixture <sap|loggedInSap|auto>
+                          The session fixture the test uses. sap: only opens the connection (a recording that starts at the logon
+                          screen). loggedInSap: logs on first unless SAP is already logged on (a recording made inside SAP).
+                          auto (default): sap when the recording contains logon steps, loggedInSap when it does not.
   --allow-no-assertion    Leave the failing guard out (the TODO comment and the header note stay). For examples and spikes.
   --strict                Exit with an error if anything could not be converted automatically (control flow, unsupported lines).
                           Notes about what the converter did on purpose - a secret replaced by an environment read - do not count.
@@ -54,6 +63,9 @@ function parseArgs(argv: string[]) {
     data: false,
     sapImport: undefined as string | undefined,
     expectStatus: undefined as string | undefined,
+    expectText: [] as string[],
+    expectTitle: undefined as string | undefined,
+    fixture: 'auto' as 'sap' | 'loggedInSap' | 'auto',
     expectImport: undefined as string | undefined,
     allowNoAssertion: false,
   };
@@ -74,7 +86,13 @@ function parseArgs(argv: string[]) {
     else if (arg === '--no-line-comments') opts.lineComments = false;
     else if (arg === '--strict') opts.strict = true;
     else if (arg === '--expect-status') opts.expectStatus = value();
-    else if (arg === '--expect-import') opts.expectImport = value();
+    else if (arg === '--expect-text') opts.expectText.push(value());
+    else if (arg === '--expect-title') opts.expectTitle = value();
+    else if (arg === '--fixture') {
+      const fixture = value();
+      if (fixture !== 'sap' && fixture !== 'loggedInSap' && fixture !== 'auto') throw new Error(`--fixture must be sap, loggedInSap or auto (found "${fixture}")`);
+      opts.fixture = fixture;
+    } else if (arg === '--expect-import') opts.expectImport = value();
     else if (arg === '--allow-no-assertion') opts.allowNoAssertion = true;
     else if (arg === '--inline') opts.inline = true;
     else if (arg === '--page-objects') opts.pageObjects = true;
@@ -131,11 +149,14 @@ function main(): void {
       lineComments: opts.lineComments,
       inline: opts.inline,
       expectStatus: opts.expectStatus,
+      expectText: opts.expectText,
+      expectTitle: opts.expectTitle,
+      fixture: opts.fixture,
       noAssertion: opts.allowNoAssertion ? ('todo' as const) : ('fail' as const),
       expectImport: opts.expectImport,
     };
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    let result: { warnings: Array<{ line: number; message: string; severity?: 'todo' | 'info' }>; envVars: string[] };
+    let result: { warnings: Array<{ line: number; message: string; severity?: 'todo' | 'info' }>; envVars: string[]; fixture: string };
     if (opts.pageObjects) {
       const generated = convertToPageObjects(decodeRecording(fs.readFileSync(file)), {
         ...common,
@@ -170,9 +191,10 @@ function main(): void {
     for (const warning of result.warnings)
       process.stdout.write(`    line ${warning.line}: ${warning.message}\n`);
     totalWarnings += result.warnings.filter((w) => w.severity !== 'info').length;
-    if (opts.expectStatus === undefined)
+    process.stdout.write(`    session fixture: ${result.fixture}\n`);
+    if (!hasAssertion(opts))
       process.stdout.write(
-        `    no assertion: ${opts.allowNoAssertion ? 'add one (TODO in the file)' : 'the test fails until you add one (use --expect-status to generate it)'}\n`,
+        `    no assertion: ${opts.allowNoAssertion ? 'add one (TODO in the file)' : 'the test fails until you add one (use --expect-text, --expect-title or --expect-status to generate it)'}\n`,
       );
   }
   if (opts.strict && totalWarnings > 0) {

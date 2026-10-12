@@ -12,14 +12,21 @@ import { JavaTransport, ProcessTransport, runConformance, SapGuiSession, SapGuiT
  * behaviour or the real JACOB library: that needs a Windows machine with SAP GUI (see bridge/jacob/README.md).
  */
 const root = path.resolve(__dirname, '../..');
-const hasJdk = spawnSync('javac', ['-version']).status === 0 && spawnSync('java', ['-version']).status === 0;
+// `javac --release` (used here and by bridge/jacob/build.*) exists from JDK 9: on JDK 8 (`javac 1.8.0_...`) the compile would
+// fail with javac's usage text, which is a skip with a reason, not a defect of the helper.
+const javac = spawnSync('javac', ['-version'], { encoding: 'utf8' });
+const javacMajor = (() => {
+  const version = /javac\s+(?:1\.)?(\d+)/.exec(`${javac.stdout}${javac.stderr}`);
+  return /javac\s+1\./.test(`${javac.stdout}${javac.stderr}`) ? 8 : version ? Number(version[1]) : 0;
+})();
+const hasJdk = javac.status === 0 && javacMajor >= 9 && spawnSync('java', ['-version']).status === 0;
 let classes = '';
 
 // Without a JDK EVERY test in this file is skipped and the run is still green: the Java/JACOB helper is then not exercised at all.
 // That is visible, not silent: the skip reason below is counted and printed by scripts/min-executed.js at the end of
 // `npm run test:smoke` / `test:framework` ("skipped Nx: needs a JDK ..."), which also fails a run that executed too little.
 // Put a JDK in the CI image to run these (see .gitlab-ci.yml, job `test`).
-test.skip(!hasJdk, 'needs a JDK (javac and java on PATH) - the Java/JACOB bridge helper was NOT exercised');
+test.skip(!hasJdk, 'needs a JDK 9 or later (javac and java on PATH; javac --release is not in JDK 8) - the Java/JACOB bridge helper was NOT exercised');
 
 test.beforeAll(() => {
   classes = fs.mkdtempSync(path.join(os.tmpdir(), 'sapbridge-java-'));

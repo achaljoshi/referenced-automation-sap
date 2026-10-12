@@ -1,4 +1,4 @@
-import { assertionLines, DEFAULT_PARAM_RULES, NO_ASSERTION_TODO, renderExpr, ruleFor, VALUE_PROPS, type GenerateOptions, type ParamRule } from './generator';
+import { assertionLines, chooseFixture, DEFAULT_PARAM_RULES, fixtureArg, fixtureNote, hasAssertion, NO_ASSERTION_TODO, renderExpr, ruleFor, VALUE_PROPS, type GenerateOptions, type ParamRule, type SessionFixture } from './generator';
 import { protectSecrets } from './secrets';
 import { COMMAND_FIELD, identifier, propertyName, quote, SESSION_PREFIX, STATUS_BAR, TABLE_CELL, TOOLBAR_BUTTON } from './names';
 import { Objects } from './objects';
@@ -26,6 +26,8 @@ export interface PageObjectResult {
   data?: { fileName: string; rows: Array<Record<string, string>> };
   warnings: ParseWarning[];
   envVars: string[];
+  /** The session fixture the test asks for. */
+  fixture: SessionFixture;
   /** Page classes generated, in screen order. */
   screens: Array<{ className: string; marker: string; controls: string[] }>;
 }
@@ -89,6 +91,8 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
   const steps = protectedSteps.steps;
   warnings.push(...protectedSteps.warnings.map((w) => ({ ...w, severity: 'info' as const })));
   for (const name of protectedSteps.envVars) envVars.add(name);
+  const chosen = chooseFixture(parsed.steps, options.fixture);
+  warnings.push(...chosen.warnings);
   // The pages file starts with CONSTANTS (typed values, secrets as environment getters) and LOCATORS (every id, named once).
   const objects = new Objects();
   objects.locator(COMMAND_FIELD); // the base class reads these two
@@ -400,13 +404,14 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
         ]
       : []),
     ` *  - every typed value (CONSTANTS) and every id (LOCATORS) is at the top of ./pages/${pagesFile}.ts: change them there; the page and property names are mechanical - rename them`,
+    fixtureNote(chosen.fixture, options.fixture),
     ' *  - no waits are needed: every step waits for SAP to be idle and for its control to exist',
     ...(options.dataDriven
       ? [
           ` *  - one test runs per row of ${dataFile}; the first row holds the values that were recorded`,
         ]
       : []),
-    ...(options.expectStatus === undefined
+    ...(!hasAssertion(options)
       ? [` *  - NO ASSERTION: ${NO_ASSERTION_TODO.replace('TODO(converter): no assertion - ', '')} ${options.noAssertion === 'todo' ? 'Add one.' : 'It ends with a guard that fails until you add one.'}`]
       : []),
     ...warnings.map((w) => ` *  - line ${w.line}: ${w.message}`),
@@ -418,7 +423,7 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
   const lines = [
     ...(options.dataDriven ? ["import * as path from 'node:path';"] : []),
     `import { sapGuiTest as test } from ${quote(options.testImport ?? '@automation/referenced-automation-sap')};`,
-    ...(options.expectStatus !== undefined ? [`import { sapExpect as expect } from ${quote(options.expectImport ?? '@automation/referenced-automation-sap')};`] : []),
+    `import { sapExpect as expect } from ${quote(options.expectImport ?? '@automation/referenced-automation-sap')};`,
     ...(options.dataDriven ? ["import { csvUtils } from '@automation/referenced-automation-utils';"] : []),
     `import { ${[...(objects.hasInputs ? ['CONSTANTS'] : []), ...(body.some((l) => l.includes('LOCATORS.')) ? ['LOCATORS'] : []), ...(usesFrame ? [`${base}Frame`] : []), ...pageClasses.map((s) => s.className)].join(', ')} } from './pages/${pagesFile}';`,
     '',
@@ -439,12 +444,12 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
     ...(options.dataDriven
       ? [
           `for (const [index, data] of rows.entries()) {`,
-          `  test(\`${title.replace(/`/g, '\\`')} [row \${index + 1}]\`, async ({ sap }) => {`,
+          `  test(\`${title.replace(/`/g, '\\`')} [row \${index + 1}]\`, async (${fixtureArg(chosen.fixture)}) => {`,
           ...testBody,
           '  });',
           '}',
         ]
-      : [`test(${quote(title)}, async ({ sap }) => {`, ...testBody, '});']),
+      : [`test(${quote(title)}, async (${fixtureArg(chosen.fixture)}) => {`, ...testBody, '});']),
     '',
   ].join('\n');
 
@@ -454,6 +459,7 @@ export function convertToPageObjects(source: string, options: PageObjectOptions)
     ...(options.dataDriven ? { data: { fileName: dataFile, rows: [dataRow] } } : {}),
     warnings,
     envVars: [...envVars],
+    fixture: chosen.fixture,
     screens: pageClasses.map((s) => ({
       className: s.className as string,
       marker: s.marker as string,

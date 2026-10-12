@@ -1,3 +1,4 @@
+import { loadEnv } from '@automation/referenced-automation-utils';
 import { expect as baseExpect, type ExpectMatcherState } from '@playwright/test';
 import {
   captureContract,
@@ -25,6 +26,8 @@ interface Reading {
   ok: boolean;
   /** What was found, for the failure message. */
   actual: string;
+  /** The control itself was not on the screen: the failure message then says what is. */
+  missing?: boolean;
 }
 
 /**
@@ -65,6 +68,7 @@ function result(
   reading: Reading,
   expected: unknown,
   subject: string,
+  screen = '',
 ) {
   const pass = reading.ok;
   return {
@@ -75,8 +79,25 @@ function result(
     message: () =>
       `${state.utils.matcherHint(name, subject, '', { isNot: state.isNot })}\n\n` +
       `Expected${state.isNot ? ' not' : ''}: ${state.utils.printExpected(expected)}\n` +
-      `Received: ${state.utils.printReceived(reading.actual)}`,
+      `Received: ${state.utils.printReceived(reading.actual)}` +
+      (screen ? `\n\n${screen}` : ''),
   };
+}
+
+/**
+ * The result of an assertion on a locator. When it failed because the control is not on the screen, the message says what is
+ * (title, status bar, labels / buttons / tabs with their ids, the closest matches, a pop-up in front) - "expected on the screen,
+ * received not on the screen" alone leaves a person to open SAP and look.
+ */
+async function resultFor(
+  state: ExpectMatcherState,
+  name: string,
+  reading: Reading,
+  expected: unknown,
+  locator: SapLocator,
+) {
+  const screen = !reading.ok && !state.isNot && reading.missing ? await locator.whatIsOnScreen() : '';
+  return result(state, name, reading, expected, String(locator), screen);
 }
 
 /**
@@ -102,9 +123,10 @@ export const expect = baseExpect.extend({
       return {
         ok: snap ? matches(snap.info.text, expected, 'equal') : false,
         actual: snap ? snap.info.text : '(control not on the screen)',
+        missing: !snap,
       };
     });
-    return result(this, 'toHaveText', reading, expected, String(locator));
+    return resultFor(this, 'toHaveText', reading, expected, locator);
   },
 
   async toContainText(
@@ -118,17 +140,18 @@ export const expect = baseExpect.extend({
       return {
         ok: snap ? matches(snap.info.text, expected, 'contain') : false,
         actual: snap ? snap.info.text : '(control not on the screen)',
+        missing: !snap,
       };
     });
-    return result(this, 'toContainText', reading, expected, String(locator));
+    return resultFor(this, 'toContainText', reading, expected, locator);
   },
 
   async toExist(this: ExpectMatcherState, locator: SapLocator, options: SapAssertionOptions = {}) {
     const reading = await until(this.isNot, options.timeout, async () => {
       const found = (await locator.count()) > 0;
-      return { ok: found, actual: found ? 'on the screen' : 'not on the screen' };
+      return { ok: found, actual: found ? 'on the screen' : 'not on the screen', missing: !found };
     });
-    return result(this, 'toExist', reading, 'on the screen', String(locator));
+    return resultFor(this, 'toExist', reading, 'on the screen', locator);
   },
 
   async toBeEditable(
@@ -145,9 +168,10 @@ export const expect = baseExpect.extend({
             ? 'editable'
             : 'read-only'
           : '(control not on the screen)',
+        missing: !snap,
       };
     });
-    return result(this, 'toBeEditable', reading, 'editable', String(locator));
+    return resultFor(this, 'toBeEditable', reading, 'editable', locator);
   },
 
   async toBeChecked(
@@ -157,11 +181,11 @@ export const expect = baseExpect.extend({
   ) {
     const reading = await until(this.isNot, options.timeout, async () => {
       const snap = await locator.snapshot();
-      if (!snap) return { ok: false, actual: '(control not on the screen)' };
+      if (!snap) return { ok: false, actual: '(control not on the screen)', missing: true };
       const selected = (await locator.get('selected').catch(() => false)) === true;
       return { ok: selected, actual: selected ? 'checked' : 'not checked' };
     });
-    return result(this, 'toBeChecked', reading, 'checked', String(locator));
+    return resultFor(this, 'toBeChecked', reading, 'checked', locator);
   },
 
   async toHaveStatusMessage(
@@ -261,9 +285,11 @@ export const expect = baseExpect.extend({
     name: string,
     options: CaptureOptions & { dir?: string; strict?: boolean; update?: boolean } = {},
   ) {
-    const dir = options.dir ?? process.env.SAP_GUI_CONTRACTS_DIR ?? DEFAULT_CONTRACTS_DIR;
+    // through the shared config like every other setting: a value in .env.<name> counts, a real environment variable wins
+    const env = loadEnv();
+    const dir = options.dir ?? env.getOptional('SAP_GUI_CONTRACTS_DIR') ?? DEFAULT_CONTRACTS_DIR;
     const current = await captureContract(sap, name, options);
-    const update = options.update ?? process.env.SAP_GUI_UPDATE_CONTRACTS === 'true';
+    const update = options.update ?? env.getOptional('SAP_GUI_UPDATE_CONTRACTS') === 'true';
     if (update && isCi()) {
       // Updating writes the baseline from whatever screen SAP shows: in CI that would "fix" a drift by accepting it,
       // and the changed file would be thrown away with the runner anyway. Baselines are captured on a workstation, reviewed and committed.

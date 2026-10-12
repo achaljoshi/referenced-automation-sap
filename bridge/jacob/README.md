@@ -4,18 +4,38 @@ An alternative to the PowerShell bridge, for machines where PowerShell is restri
 
 ## Build
 
-You need a JDK (8 or later; `javac` and `jar` on PATH) and the JACOB **binary** jar your Java framework uses (for example `jacob-1.18.jar`, not `jacob-1.18-sources.jar`).
+You need:
+
+- **a JDK 9 or later** (`javac` and `jar` on `PATH`). The build uses `javac --release 8`, and `--release` does not exist before JDK 9: on JDK 8 `javac` only prints its usage text (`javac <options> <source files>`). `javac -version` must say 9 or higher. The *result* targets Java 8, so a Java 8 or newer **runtime** is enough to run it.
+- the JACOB **binary** jar your Java framework uses (for example `jacob-1.18.jar`) - **not** the `-sources` jar (`jacob-1.18-sources.jar` contains no classes to compile against).
 
 ```bash
 cd bridge/jacob
-./build.sh /path/to/jacob-1.18.jar           # Windows: build.bat C:\path\to\jacob-1.18.jar
+./build.sh /path/to/jacob-1.18.jar           # Windows PowerShell: .\build.bat C:\path\to\jacob-1.18.jar
 ```
 
-This produces `bridge/jacob/sap-bridge.jar` (compiled for Java 8, so any later runtime works).
+This produces `bridge/jacob/sap-bridge.jar`.
+
+**If an older Java is found first** (`javac -version` says `1.8...`): install a JDK 9+ and put it ahead on the path for the terminal you build in -
+
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Java\jdk-17"
+$env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+javac -version        # javac 17.x
+```
+
+- or permanently for VS Code's terminals, in `settings.json` (then open a **new** terminal):
+
+```json
+"terminal.integrated.env.windows": {
+  "JAVA_HOME": "C:\\Program Files\\Java\\jdk-17",
+  "PATH": "C:\\Program Files\\Java\\jdk-17\\bin;${env:PATH}"
+}
+```
 
 ## Use
 
-Tell the framework which bridge to use, in `.env.<name>` (these are not secrets):
+Tell the framework which bridge to use, in `.env.<name>` (these are not secrets; every key is also explained in `.env.example`):
 
 ```
 SAP_GUI_TRANSPORT=java
@@ -25,7 +45,14 @@ SAP_GUI_JACOB_DLL=C:\path\to\jacob-1.18-x64.dll    # the FULL path, in the bitne
 # SAP_GUI_JAVA=C:\Program Files\Java\jdk-17\bin\java.exe   (default: java from PATH)
 ```
 
-`SAP_GUI_JACOB_DLL` is what the existing framework passes as `jacob.dll.path`. Use the `x64` DLL with a 64-bit Java and the `x86` DLL with a 32-bit Java.
+| Key | What it is |
+|---|---|
+| `SAP_GUI_BRIDGE_JAR` | the `sap-bridge.jar` you just built |
+| `SAP_GUI_JACOB_JAR` | the JACOB **binary** jar (not `-sources`) |
+| `SAP_GUI_JACOB_DLL` | the JACOB DLL, **full path** - what the existing framework passes as `jacob.dll.path` |
+| `SAP_GUI_JAVA` | the `java.exe` to run it with (default `java` from `PATH`) |
+
+**DLL bitness must match the Java, not Windows:** the `x64` DLL with a 64-bit Java, the `x86` DLL with a 32-bit Java (`java -version` says `64-Bit Server VM` for 64-bit). A mismatch typically fails at start with an `UnsatisfiedLinkError` such as `Can't load IA 32-bit .dll on a AMD 64-bit platform`. If that Java is not the first on `PATH`, set `SAP_GUI_JAVA`. In PowerShell, `Test-Path` each of the three paths before the first run; a missing one is reported by name (`the JACOB DLL (SAP_GUI_JACOB_DLL) was not found`).
 
 Then check it the same way as the PowerShell bridge:
 
@@ -38,9 +65,11 @@ npm run doctor -- --conformance          # --write also types into the command f
 
 ## What is and is not verified
 
+Reported from a real machine: the helper **passed all 15 conformance checks** (`npm run conformance`) there - that is all that is claimed (not which SAP release, not other machines). A real logon, a transaction and a recording were also exercised by hand on that machine.
+
 Verified (in this repository's tests): the helper compiles for Java 8, and when run against **stand-in JACOB classes** (a tiny in-memory SAP model under `tests/gui/bridges/jacob-stub`) it speaks the protocol correctly, handles chained access, find, UTF-8 text, 32-bit number conversion and error codes, and passes the same conformance suite as the simulator and the stand-in process bridge.
 
-**Not verified until it runs on a Windows machine with SAP GUI and the real JACOB:** the actual COM calls (the helper uses `Dispatch.call/get/put` the way the existing framework's `SAPDriver` and `SAPElement` do, but it has not been exercised against a real SAP system), the new `find` / `info` / `context` operations and `OpenConnectionByConnectionString` on your SAP GUI release, and SAP Logon auto-start. Run `npm run doctor -- --conformance` first.
+**Not verified beyond that:** other machines and SAP GUI releases than the one above, `OpenConnectionByConnectionString`, and SAP Logon auto-start. Run `npm run doctor -- --conformance` first on every new machine.
 
 ## What it deliberately does not do
 

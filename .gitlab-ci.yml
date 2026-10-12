@@ -118,6 +118,9 @@ test:
     # The SAP GUI framework (VBScript converter, session waiting) against the
     # in-memory simulator - needs no SAP and no Windows, so it runs here.
     - npm run test:framework
+    # The sample tests in tests/sapgui (logon, transaction, the worked example 04_example_every_feature) against the same
+    # simulator: without this they are only ever skipped in CI and could rot unnoticed. ENV=simulator is set by the script.
+    - npm run try:simulator
   artifacts:
     when: always
     paths:

@@ -157,6 +157,24 @@ test.describe('toMatchScreenContract', () => {
     }
     pw(fs.existsSync(contractPath(dir, 'from-env'))).toBe(true);
   });
+
+  test('the same two settings in a .env.<name> file count too (every setting comes through the shared config, not only the process environment)', async () => {
+    const work = tmp();
+    const dir = path.join(work, 'baselines');
+    fs.writeFileSync(path.join(work, '.env.contractdocs'), `SAP_GUI_CONTRACTS_DIR=${dir.replace(/\\/g, '/')}\nSAP_GUI_UPDATE_CONTRACTS=true\n`);
+    const savedEnv = process.env.ENV;
+    const savedCwd = process.cwd();
+    process.env.ENV = 'contractdocs';
+    process.chdir(work);
+    try {
+      await expect(await screen(base)).toMatchScreenContract('from-env-file');
+    } finally {
+      process.chdir(savedCwd);
+      if (savedEnv === undefined) delete process.env.ENV;
+      else process.env.ENV = savedEnv;
+    }
+    pw(fs.existsSync(contractPath(dir, 'from-env-file'))).toBe(true);
+  });
 });
 
 test.describe('sap-gui-contracts CLI (against the built-in simulator)', () => {

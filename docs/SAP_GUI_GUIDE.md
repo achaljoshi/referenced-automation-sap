@@ -46,9 +46,82 @@ A recording has no waits. It worked when you recorded it because you were slow; 
 4. **Configure** (see section 4).
 5. **Check:** `npm run doctor` (and `npm run doctor -- --conformance`, which runs a fixed set of checks against your SAP and says whether this transport conforms). It does what the tests will do and prints OK/FAIL per step with the fix.
 
+## 3b. Windows first run (PowerShell)
+
+From a clean Windows machine (an AWS WorkSpace, a laptop) with SAP GUI to your first recorded test that runs. Every command is PowerShell, typed in the VS Code terminal (**Terminal > New Terminal**; the prompt starts with `PS`). Two differences from the examples elsewhere that trip people up:
+
+| bash / cmd.exe | PowerShell |
+|---|---|
+| `export NAME=value` / `set NAME=value` | `$env:NAME = "value"` (single quotes when the value contains `$`) |
+| `unset NAME` / `set NAME=` | `Remove-Item Env:NAME` |
+| `./scripts/setup.sh` | `.\scripts\setup.bat` |
+| `cp a b` | `Copy-Item a b` |
+
+A variable you set in the shell wins over every `.env` file and lasts until the terminal is closed - if a setting "does not take", run `Get-ChildItem Env:SAP_*`.
+
+### Step by step
+
+1. **Install.** Node 18+ (`node -v`) and SAP GUI with scripting enabled (section 3). In the repo folder run `.\scripts\setup.bat` (add `--local` when `referenced-automation-utils` and `-ui` are checked out next to this repo and are not in a registry). It runs `npm ci` and installs the Playwright browser. If you set `NPM_REGISTRY_URL` first (`$env:NPM_REGISTRY_URL = "<your registry>"`) the script runs `npm config set registry` with it. Afterwards the folder `node_modules` exists; without it `tsc` and `playwright` are "not recognized".
+2. **Build and check:** `npm run build`, then `npm run doctor` (it does what the tests will do and says OK or FAIL per step with the fix; `npm run doctor -- --conformance` checks the bridge itself).
+3. **Configure.** Non-secret settings in `.env.qa` (it is committed): `SAP_GUI_MODE`, `SAP_GUI_CONNECTION_NAME`, `SAP_CLIENT`, `SAP_USER`, `SAP_LANGUAGE` - in SAP, **System > Status** shows client, user and language; the connection name is the entry in SAP Logon. The password only in the git-ignored `.env.qa.local`:
+   ```powershell
+   Copy-Item .env.qa.local.example .env.qa.local
+   # edit it:  SAP_PASSWORD="my#pass word"      <- double quotes: an unquoted # cuts the password
+   ```
+   Every variable is explained in `.env.example`. **Log on by hand with exactly these values before the first run** - see [Credentials and lock-out protection](#credentials-and-lock-out-protection).
+4. **Choose how the test gets SAP** - it decides where you start recording:
+
+   | | `SAP_GUI_MODE=open` | `SAP_GUI_MODE=attach` |
+   |---|---|---|
+   | SAP at the start of a test | the framework opens `SAP_GUI_CONNECTION_NAME`; you are at the **logon screen** | the SAP Logon window you already have open and logged on |
+   | Start the recording at | **the logon screen** - the recording contains the logon | **SAP Easy Access**, already logged on |
+   | The converter writes | `async ({ sap })` (it types the logon itself) | `async ({ loggedInSap: sap })` |
+   | Switch | `$env:SAP_GUI_MODE = "open"` | `$env:SAP_GUI_MODE = "attach"`; `Remove-Item Env:SAP_GUI_MODE` returns to the file's value |
+
+   `sap` only opens the connection, so a recording made **while logged on** would start on the logon screen in open mode and fail to find the command field. The converter therefore chooses the fixture by looking for logon steps in the recording (`--fixture auto`): with none it writes `loggedInSap`, which logs on first when SAP shows the logon screen and does nothing when you are already in. Either recording therefore runs in either mode.
+5. **Record.** In SAP GUI press **Alt+F12 > Script Recording and Playback** to open the **Record and Playback** dialog.
+   - **Save To:** a **local, non-synced folder** such as `C:\Temp\sap` - not OneDrive, WorkDocs or another synced folder, which hold the file open while they upload it.
+   - **File name:** a **new name every time**. Saving over a name that SAP GUI or a sync client still holds open fails with `The process cannot access the file because it is being used by another process`.
+   - **Encoding:** *Unicode*, *UTF-8* and *ANSI* are all read by the converter.
+   - Start the recording, do the flow, stop it. In open mode start at the logon screen; in attach mode start from Easy Access.
+6. **Copy it into `recordings\`** (`Copy-Item C:\Temp\sap\my_recording.vbs recordings\`). The recording contains the password you typed in clear text: do not commit the `.vbs`.
+7. **Convert** - with the assertion you want:
+   ```powershell
+   npm run convert -- --expect-text "Address" --expect-status "has been saved"
+   # one file, all options spelled out (backslashes are fine for node):
+   node dist/cli/convertVbs.js recordings\my_recording.vbs --out tests/sapgui --test-import ./support/sapTest --expect-import ./support/sapTest --expect-text "Address" --strict
+   ```
+   `npx sap-vbs-to-playwright` does not exist inside this repo - the `sap-*` commands are installed into projects that depend on the package. `npm run convert` reads every file in `recordings\`; arguments after `--` are appended.
+8. **Edit** `tests\sapgui\my_recording.spec.ts`: `CONSTANTS` (what the recording typed) and `LOCATORS` (every control id) are at the top; the header lists what the converter could not convert. If you passed no `--expect-*`, replace the `TODO(converter)` guard at the end by a check - `import`ed `expect` is the SAP-aware one, so `await expect(sap.getByText('Address').first()).toExist();` works.
+9. **Run one test.** Use **forward slashes**; a backslash path after `playwright test` is treated as a regular expression and gives `No tests found`. Or select by title:
+   ```powershell
+   npx playwright test tests/sapgui/my_recording.spec.ts
+   npx playwright test -g "recorded: my_recording"
+   ```
+10. **Report:** `npx playwright show-report` opens `playwright-report\index.html`. A failed test has `sap-steps` (the journal), `sap-status-bar`, `sap-screenshot`, and an assertion on a missing control lists what *is* on the screen.
+
+If the logon fails: **stop and fix the credentials before running again.** SAP counts every wrong logon.
+
+### Where it goes wrong - the exact messages
+
+| You see | Cause | Do this |
+|---|---|---|
+| `'tsc' is not recognized as an internal or external command` (no `node_modules` folder) | the install did not run or failed part-way | `.\scripts\setup.bat` (`--local` without a registry) and read its first error |
+| `Cannot find module '...\dist\cli\doctor.js'` | the TypeScript was never compiled | `npm run build` first (`npm run doctor`, `npm run convert` use `dist\`) |
+| `Illegal characters in path` mentioning `*.tgz` (`npm run clean`, `create-package`) | the old clean script handed the pattern `*.tgz` to Windows; fixed with `rimraf --glob` | use the current version of the repo |
+| `javac <options> <source files>` (the usage text) building `bridge/jacob` | `javac --release` needs **JDK 9 or later** and the first `javac` on `PATH` is JDK 8 | install JDK 9+, set `JAVA_HOME`, put `%JAVA_HOME%\bin` ahead of the old Java on `PATH` (VS Code: `"terminal.integrated.env.windows": { "JAVA_HOME": "C:\\Program Files\\Java\\jdk-17", "PATH": "C:\\Program Files\\Java\\jdk-17\\bin;${env:PATH}" }`, then open a new terminal); `javac -version` must say 9 or higher |
+| `The process cannot access the file because it is being used by another process` saving a recording | a synced folder, or SAP GUI / a sync client still holds a file of that name | save to `C:\Temp\sap`, new file name each time |
+| `No tests found` | a Windows path with backslashes | forward slashes, or `-g "recorded: my_recording"` |
+| `still on the logon screen ... Name or password is incorrect (repeat logon)` | wrong user, client or password; an unquoted `#` in the password; or a locked user | the message lists what to check; fix it, log on by hand once, then run again |
+| `logon NOT attempted - it would have repeated a logon that SAP has just rejected` | the lock-out protection (below) | change the credentials, or delete `.sap-state\logon-failed.json`, or wait |
+| `TypeError: expect(...).toExist is not a function` / `Property 'toExist' does not exist on type` | `expect` imported from `@playwright/test` | `import { expect } from './support/sapTest'` - or let the converter write `import { sapExpect as expect } from ...` (it always does) |
+| `'sap-vbs-to-playwright' is not recognized` | the `npx sap-*` names exist only in projects that depend on this package | `npm run convert` / `node dist\cli\convertVbs.js` |
+
 ## 4. Configuration
 
-Settings come from `.env.<name>` (committed, **no secrets**), overridden by `.env.<name>.local` (git-ignored, for secrets), overridden by real environment variables (CI). Pick the file with `ENV=qa` (the default is `qa`).
+Settings come from `.env.<name>` (committed, **no secrets**), overridden by `.env.<name>.local` (git-ignored, for secrets; template `.env.qa.local.example`), overridden by real environment variables (CI; PowerShell `$env:NAME = "value"`). Pick the file with `ENV=qa` (the default is `qa`). A value with `#`, `$` or spaces goes in double quotes (`SAP_PASSWORD="my#pass word"`) - an unquoted `#` starts a comment and silently cuts the value.
+
+**This table lists the SAP settings; [`.env.example`](../.env.example) is the exhaustive reference** - every variable the repo reads (including the `REMOTE_*`, Java/JACOB, Playwright and logging ones), each with what it is for, valid values, default, whether it is required, whether it is a secret, and where to find the value in SAP GUI. The README has the same list as the [Configuration reference](../README.md#configuration-reference) table; `tests/gui/envDocs.spec.ts` fails when either drifts from the code.
 
 | Variable | Meaning | Default |
 |---|---|---|
@@ -71,6 +144,8 @@ Settings come from `.env.<name>` (committed, **no secrets**), overridden by `.en
 | `SAP_GUI_EVIDENCE` | `off` / `failure` (screenshot + journal on failure) / `steps` (also after every screen change) | `failure` |
 | `SAP_GUI_EVIDENCE_DIR` | where screenshots are written before they are attached (and then deleted) | `test-results/sap-evidence` |
 | `SAP_MULTIPLE_LOGON` | `continue` or `fail` when SAP says the user is already logged on | `continue` |
+| `SAP_LOGON_FAILURE_COOLDOWN_MIN` | after SAP rejects a logon, the same client + user + password is not typed into SAP again for this many minutes (`0` = off) - see [Credentials and lock-out protection](#credentials-and-lock-out-protection) | `15` |
+| `SAP_GUI_LOGON_MARKER_DIR` | folder of the marker that remembers the rejected logon (not under `test-results`: Playwright empties that every run) | `.sap-state` |
 | `SAP_GUI_LOGON_PATH` | `saplogon.exe`, started in `open` mode if SAP Logon isn't running | `C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe` |
 | `SAP_GUI_POWERSHELL` | path to `powershell.exe`; a 32-bit SAP GUI needs `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe` | `powershell.exe` |
 | `SAP_GUI_POWERSHELL_SCRIPT_DIR` | folder with an approved (typically signed) `sap-gui-bridge.ps1` (`npm run doctor -- --print-bridge \| Out-File -Encoding ascii sap-gui-bridge.ps1`, then sign it): it is run as it is and `-ExecutionPolicy Bypass` is NOT passed. A copy that differs from this version's script is refused. Without it the bridge runs from a temp file with `-ExecutionPolicy Bypass` for that one process | |
@@ -85,6 +160,8 @@ Settings come from `.env.<name>` (committed, **no secrets**), overridden by `.en
 Start from `tests/sapgui/`: `01_connect_and_login` (smallest), `02_open_transaction`, `03_create_sales_order.TEMPLATE` (a whole flow) with its page objects in `pages/`.
 
 **The rule of thumb: a test says *what* happens; a page object knows *where* (the ids); the framework handles *when* (waiting).**
+
+**`sap` or `loggedInSap`?** Both are the worker's one session; they differ in where it starts. `sap` is the connection as it is: with `SAP_GUI_MODE=open` the **logon screen** (the fixture to use when the test itself types the logon, as a recording of the logon does). `loggedInSap` logs on first when SAP shows the logon screen (`SAP_USER`, `SAP_PASSWORD`, `SAP_CLIENT`, `SAP_LANGUAGE`) and leaves an already logged-on session alone - use it for hand-written tests and for recordings made inside SAP. Both come from the package's `sapGuiTest`; `tests/sapgui/support/sapTest.ts` simply re-exports it, and you extend it there with your own fixtures.
 
 ```ts
 import { expect, test } from './support/sapTest';
@@ -145,7 +222,17 @@ await expect(sap).toHaveTitle(/Create Standard Order/);
 await expect(sap).toHaveNoStatusError();                              // no error (E) or abort (A) - after SAP has answered
 ```
 
-They re-check until they hold or the timeout (default 5 s, `{ timeout }` to change) - SAP changes after a server round trip, so a one-shot read right after an action is a race. Everything from Playwright's `expect` works too (`expect.soft`, `.not`, ...).
+They re-check until they hold or the timeout (default 5 s, `{ timeout }` to change) - SAP changes after a server round trip, so a one-shot read right after an action is a race. Everything from Playwright's `expect` works too (`expect.soft`, `.not`, ...). Import `expect` from the SAP module (`import { expect } from './support/sapTest'`, or `sapExpect`): Playwright's own `expect` has no `toExist`.
+
+**When the control is not on the screen the message says what is.** `toExist`, `toHaveText`, `toContainText`, `toBeEditable` and `toBeChecked` append, after the usual `Expected` / `Received`:
+
+```
+On the screen now (wnd[0]): title "Customer: Overview", status bar "Enter a customer" [W], texts (6): "Addresses" (wnd[0]/usr/lblADDR), "General Data" (wnd[0]/usr/tabsT/tabpGEN), tooltip "Save (Ctrl+S)" (wnd[0]/tbar[0]/btn[11]), ...
+Closest to "Address": "Addresses" (wnd[0]/usr/lblADDR)
+A pop-up is in front (wnd[1], title "System Message") - the control may be behind it, or the flow took a different path. On the pop-up: texts (2): ...
+```
+
+It lists up to 25 labels, buttons, tabs, menu entries, check and radio buttons and group boxes with their ids (a toolbar button with no text shows its tooltip), then the controls closest to what you asked for - contained in it, or a typo or plural away - and the pop-up(s) in front. The walk has a time budget, the block a size limit, and it is built from the session's own `children` / `info` operations, so it works on every transport. **Passwords are never shown**, and neither is the value of any input field - only text a user reads. The same listing is appended to the message of an action (`click`, `fill`, ...) on a locator that matches nothing. Plain `getByText('Address')` matches any text that *contains* "Address" (case-insensitive); `{ exact: true }` wants the whole text.
 
 `.not.toHaveStatusMessage(/./, { type: 'E' })` passes the moment the status bar is not an error - including on the old screen before SAP has answered. `toHaveNoStatusError()` (the BDD step *the status bar does not show an error*) first waits, bounded, for evidence that SAP has answered the last action - a status message of type S, I or W, or the screen / title / round-trip counter having moved - then checks for E **and** A, and fails if nothing at all is observed (an empty status bar on an unchanged screen proves nothing). `{ requireOutcome: false }` / the step *... does not show an error right now* checks the status bar as it is.
 
@@ -174,9 +261,16 @@ await sap.table('wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG').cell('txtRV45A-KWME
 - **Evidence:** `await sap.evidence('label')` attaches a screenshot to the report. `SAP_GUI_EVIDENCE=steps` also captures after every screen-changing step; `off` disables failure diagnostics.
 - **On failure** the report gets `sap-steps` (the step journal: what ran, how long, which step failed and why), `sap-status-bar`, and `sap-screenshot`.
 
-### Credentials
+### Credentials and lock-out protection
 
-The password is looked up as `SAP_PASSWORD` in this order: real environment variable (CI: use a masked variable) -> `.env.<name>.local` -> a Windows-DPAPI-protected file. Create the last with `npm run secret -- set SAP_PASSWORD` (prompts, hidden): it can be opened only by the same Windows user on the same machine. Nothing stores a key beside a password. See `ARCHITECTURE.md` decision 10.
+The password is looked up as `SAP_PASSWORD` in this order: real environment variable (CI: use a masked variable) -> `.env.<name>.local` -> a Windows-DPAPI-protected file. Create the last with `npm run secret -- set SAP_PASSWORD` (prompts, hidden): it can be opened only by the same Windows user on the same machine. Nothing stores a key beside a password. See `ARCHITECTURE.md` decision 10. A password with `#`, `$` or spaces must be in double quotes in the `.env` file (`SAP_PASSWORD="my#pass word"`); inside double quotes `\n` is read as a line break, so use single quotes for a password that contains a backslash.
+
+**A wrong logon is counted by SAP, and a few of them lock the user.** A failed run is routinely started again - a CI retry, the next test of the same worker, a person pressing run once more - and each repetition is another wrong logon. So:
+
+- **The failure says what to check.** The message of a logon that stays on the logon screen keeps SAP's own status text (`Name or password is incorrect (repeat logon)`) and adds: check `SAP_USER`, `SAP_CLIENT` and `SAP_PASSWORD` against what works in SAP Logon (a variable exported in your shell wins over the file); special characters need double quotes in the `.env` file; the user may be locked or its password expired (SU01); and the warning that repeated wrong logons **lock the SAP user** - do not run again until it is fixed.
+- **It also stops the repeat.** After a logon that failed with *name or password incorrect* or *user is locked* (English and German texts), `logon()` writes a marker, `.sap-state/logon-failed.json`: client, user, a **salted fingerprint** of the password (never the password), SAP's status text and the time. For `SAP_LOGON_FAILURE_COOLDOWN_MIN` minutes (default **15**, `0` = off) a logon with the same client + user + password is refused *without typing anything into SAP*: `logon NOT attempted - it would have repeated a logon that SAP has just rejected ...`. That covers `loggedInSap`, `ensureLoggedIn`, CI retries and re-runs. A pop-up after logon (password expired, already logged on) does not arm it.
+- **How to go on:** fix the credentials - a changed password, user or client does not match the marker, so the next run goes through at once (and a successful logon deletes the marker); or delete `.sap-state\logon-failed.json` once you know the password was reset or the user unlocked; or wait out the cooldown.
+- The marker is **not** under `test-results`: Playwright empties that folder when a run starts, which would remove the marker exactly when the next run needs it. It lives in `SAP_GUI_LOGON_MARKER_DIR` (default `.sap-state`, git-ignored). A CI job starts from a clean checkout, so it protects retries inside the job; to stop re-runs across pipelines point `SAP_GUI_LOGON_MARKER_DIR` at a folder you cache between jobs.
 
 ### Finding ids
 
@@ -308,7 +402,17 @@ cp my_recording.vbs recordings/
 npm run convert              # -> tests/sapgui/my_recording.spec.ts
 ```
 
-Review the generated header. It lists everything that needs a human.
+Review the generated header. It lists everything that needs a human. Add the assertion on the command line - `npm run convert -- --expect-text "Address" --expect-title "Standard Order" --expect-status "has been saved"` (any combination; `--expect-text` is repeatable) - or by hand afterwards.
+
+| Option | Writes |
+|---|---|
+| `--expect-text <text>` (repeatable) | `await expect(sap.getByText('<text>').first()).toExist();` |
+| `--expect-title <regex>` | `await expect(sap).toHaveTitle(/<regex>/i);` |
+| `--expect-status <regex>` | `await expect(sap).toHaveStatusMessage(/<regex>/i);` |
+| `--expect-import <module>` | where `sapExpect` (imported as `expect`) comes from. It is **always imported** - flat, page-object and data-driven tests alike - so an assertion added by hand works; without an assertion option the import is kept used by a `void expect;` line to delete once you add the check |
+| `--fixture sap\|loggedInSap\|auto` | `async ({ sap })` or `async ({ loggedInSap: sap })`. `auto` (default): `sap` when the recording contains the logon (typing into the client / user / password / language fields, or into a password field before anything was typed inside SAP), `loggedInSap` when it does not - a recording made while logged on has no logon screen to start from |
+
+Any of the three assertion options satisfies the "no assertion" guard and `--strict`. `--fixture loggedInSap` on a recording that logs on itself is reported as something to fix.
 
 | Recorded | Result |
 |---|---|
@@ -362,9 +466,13 @@ Another order type: change `inputs.vbakAuart`. A screen was customised and the i
 | `no control matched label "..."` | wrong label/language, or the screen is not the one you think | `npm run doctor -- --dump`; labels follow the SAP logon language |
 | steps fail because a pop-up is in front | an unexpected modal window | `sap.onPopup(...)` once; see the `sap-steps` attachment to find which step first failed |
 | `could not unprotect ... .dpapi` | the secret file was made by another Windows user or on another machine | run `npm run secret -- set SAP_PASSWORD` as the user that runs the tests |
-| `still on the logon screen ... Status bar: "Name or password is incorrect"` | wrong credentials/client | fix them; watch for locking the user after repeated failures |
+| `still on the logon screen after sending Enter. SAP's status bar says: "Name or password is incorrect (repeat logon)"` | wrong credentials/client, a `#` in the password that was not in double quotes, or a locked user | the message lists what to check; **do not re-run until fixed** - repeated wrong logons lock the user ([lock-out protection](#credentials-and-lock-out-protection)) |
+| `logon NOT attempted - it would have repeated a logon that SAP has just rejected` | the same client + user + password was rejected less than `SAP_LOGON_FAILURE_COOLDOWN_MIN` minutes ago | change the credentials (clears it at once), delete `.sap-state/logon-failed.json` if you fixed it in SAP, or wait |
+| `On the screen now (wnd[0]): ...` at the end of a failed assertion | the control is not on the screen: this is the listing of what is | compare the ids and the `Closest to ...` line with what you asked for; a pop-up in front is named too |
+| `TypeError: expect(...).toExist is not a function` | `expect` came from `@playwright/test` | import the SAP one: `import { expect } from './support/sapTest'` |
 | `SAP showed a pop-up after logon` | already logged on elsewhere, or password expired | `npm run doctor -- --dump "wnd[1]"` while it shows; handle it in your base test |
 | `"wnd[0]/usr/..." not found after 30000ms. Nearest id that does exist ...` | wrong id, or the flow took a different path (an unexpected pop-up or screen) | read the "contains:" list and the status bar text in the message; `--dump` the screen; re-record |
+| a converted test starts on the logon screen and cannot find `wnd[0]/tbar[0]/okcd` | it was recorded while logged on but uses `{ sap }` | regenerate (`--fixture auto` picks `loggedInSap`) or change the argument to `{ loggedInSap: sap }` |
 | a converted recording works once, then fails | it depends on data the first run changed | make the test create or choose its own data |
 | `TODO(manual ...)` in a generated spec | the recording had logic | write that part by hand with `sap.*` |
 
@@ -377,6 +485,8 @@ On any failure the report attaches the status bar text and a screenshot of the S
 - Run `npm run convert` (it passes `--strict`) in a pipeline if you want unconverted logic to fail the build rather than slip through.
 
 ## 9. What has and has not been verified
+
+**Reported from a real machine** (by the person who ran it, not by this repository's tests): the Java/JACOB bridge passed its 15 conformance checks (`npm run conformance`) on one real Windows machine with SAP GUI, and a real logon, a transaction and a recording were exercised by hand there. Nothing else is claimed: other SAP GUI releases, the PowerShell bridge on other machines and the remote-desktop path are still unverified.
 
 Verified, on macOS without SAP: the parser and generator (including a realistic VA01 recording), the session's waiting and error messages against a simulator with screen-change latency, the logon helper's failure paths, password handling (not in specs, not in logs), the CLI, screen inspection, the sample tests against the simulator, and that the bridge script is ASCII-only and its only `Start-Process` is the SAP Logon launch.
 

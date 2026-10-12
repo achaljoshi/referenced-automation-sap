@@ -1,7 +1,22 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { createSampleSapSystem, dumpScreen, ensureLoggedIn, formatScreenDump, logon, SapGuiSession } from '../../src';
 
 const FAST = { timeoutMs: 3_000, pollMs: 10 };
+
+// A wrong password arms the logon cooldown (see logonGuard.ts): keep each test's marker in a folder of its own so that
+// neither another test nor the next run of this suite is refused because of a failure this file provoked on purpose.
+const savedMarkerDir = process.env.SAP_GUI_LOGON_MARKER_DIR;
+test.beforeEach(() => {
+  process.env.SAP_GUI_LOGON_MARKER_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sap-logon-marker-'));
+});
+test.afterEach(() => {
+  fs.rmSync(process.env.SAP_GUI_LOGON_MARKER_DIR ?? '', { recursive: true, force: true });
+  if (savedMarkerDir === undefined) delete process.env.SAP_GUI_LOGON_MARKER_DIR;
+  else process.env.SAP_GUI_LOGON_MARKER_DIR = savedMarkerDir;
+});
 const good = { client: '100', user: 'TESTUSER', password: 'correct-horse', language: 'EN' };
 
 async function fresh() {

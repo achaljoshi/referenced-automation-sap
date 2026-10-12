@@ -61,5 +61,8 @@ bridge/jacob/sap-bridge.jar
 # fortnightly audit output (keep it between audits; see referenced-automation-utils docs/governance/AUDIT.md)
 audit-reports/
 
+# the logon-failure marker (SAP_LOGON_FAILURE_COOLDOWN_MIN) - holds client, user and a fingerprint of a rejected password, never committed
+.sap-state/
+
 # mailbox folder of the remote desktop host client (SAP_GUI_TRANSPORT=remote; REMOTE_SHARE_DIR default)
 .remote-mailbox/

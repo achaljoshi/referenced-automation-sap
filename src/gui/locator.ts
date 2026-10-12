@@ -1,4 +1,5 @@
 import { AdapterError } from '@automation/referenced-automation-utils';
+import { describeScreen, type ScreenTerm } from './screenHints';
 import type { SapGuiSession } from './session';
 import type { ControlInfo, FindCriteria, SapGuiValue } from './types';
 
@@ -192,8 +193,27 @@ export class SapLocator {
       'locate',
       `no control matched ${this.description} after ${waitedMs}ms` +
         (status ? `. Status bar says: "${status}"` : '') +
-        '. See what is on the screen with: npm run doctor -- --dump',
+        '. See what is on the screen with: npm run doctor -- --dump' +
+        `\n${await this.whatIsOnScreen()}`,
     );
+  }
+
+  /** What this locator looks for, as words to compare with the screen: the text / label / tooltip / name asked for, or the last part of an id. */
+  searchTerms(): ScreenTerm[] {
+    const s = this.selector;
+    if (s.kind === 'id') return [{ id: s.id }];
+    if (s.kind === 'child') return [{ id: s.relative }];
+    if (s.kind === 'fallback') return [...s.primary.searchTerms(), ...s.alternates.flatMap((a) => a.searchTerms())];
+    const c = s.criteria;
+    return [c.text, c.label, c.tooltip, c.name].filter((t): t is string => typeof t === 'string' && t !== '');
+  }
+
+  /**
+   * "On the screen now (wnd[0]): title ..., status bar ..., texts: ..." plus the controls closest to what this locator looks for, and
+   * the pop-up if one is in front. For failure messages; bounded, passwords never shown, never throws.
+   */
+  async whatIsOnScreen(): Promise<string> {
+    return describeScreen(this.sap, this.searchTerms());
   }
 
   // ------------------------------------------------------------- reading

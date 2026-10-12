@@ -480,6 +480,11 @@ export interface SampleSapSystemOptions {
   reportRoundTrips?: boolean;
   /** After a correct logon, show the "user already logged on" pop-up first (like a real system does when the user has another session). */
   multipleLogon?: boolean;
+  /**
+   * Lock the user after this many wrong logons, like SAP's login/fails_to_user_lock: the next logon - even with the right password -
+   * then answers "User ... is locked". Default: never.
+   */
+  lockAfterFailures?: number;
 }
 
 /**
@@ -494,6 +499,10 @@ export interface SampleSapState {
   created: number[];
   /** Order numbers deleted through VA02, in order. */
   deleted: number[];
+  /** Logons the system rejected (wrong name, password or client) - what a lock-out counts. */
+  failedLogons: number;
+  /** The user has been locked (see `lockAfterFailures`). */
+  locked: boolean;
 }
 
 export function createSampleSapSystem(options: SampleSapSystemOptions = {}): FakeSapGui & { readonly sample: SampleSapState } {
@@ -503,14 +512,32 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
     client = '100',
     transitionDelayMs = 150,
     multipleLogon = false,
+    lockAfterFailures,
     responseLagMs,
     notFoundMessage,
     reportRoundTrips,
   } = options;
   const wrongLogin = 'Name or password is incorrect (repeat logon)';
   let orderCounter = 0; // each save in this system gets the next order number
-  const sample: SampleSapState = { created: [], deleted: [] };
+  const sample: SampleSapState = { created: [], deleted: [], failedLogons: 0, locked: false };
   let changing = 0; // the order VA02 is showing
+
+  // Enter on a logon screen (the first one and the one that shows the error): right credentials go in, wrong ones are counted.
+  const tryLogon = (vKey: number, ctx: FakeContext): string | undefined => {
+    if (vKey !== 0) return undefined;
+    if (sample.locked) return 'logonLocked';
+    const ok =
+      ctx.get('wnd[0]/usr/txtRSYST-BNAME', 'text') === user &&
+      ctx.get('wnd[0]/usr/pwdRSYST-BCODE', 'text') === password &&
+      ctx.get('wnd[0]/usr/txtRSYST-MANDT', 'text') === client;
+    if (ok) return multipleLogon ? 'multipleLogon' : 'easyAccess';
+    sample.failedLogons++;
+    if (lockAfterFailures !== undefined && sample.failedLogons >= lockAfterFailures) {
+      sample.locked = true;
+      return 'logonLocked';
+    }
+    return 'logonFailed';
+  };
 
   const fake = new FakeSapGui({
     start: 'logon',
@@ -534,14 +561,7 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
           'wnd[0]/usr/txtRSYST-LANGU': { type: 'GuiTextField', props: { leftLabel: 'Language' } },
           'wnd[0]/sbar': { type: 'GuiStatusbar' },
         },
-        onVKey: (vKey, ctx) => {
-          if (vKey !== 0) return undefined;
-          const ok =
-            ctx.get('wnd[0]/usr/txtRSYST-BNAME', 'text') === user &&
-            ctx.get('wnd[0]/usr/pwdRSYST-BCODE', 'text') === password &&
-            ctx.get('wnd[0]/usr/txtRSYST-MANDT', 'text') === client;
-          return ok ? (multipleLogon ? 'multipleLogon' : 'easyAccess') : 'logonFailed';
-        },
+        onVKey: (vKey, ctx) => tryLogon(vKey, ctx),
       },
       {
         // Real SAP: a dialog (wnd[1]) over the logon window; OPT2 = continue without ending the other sessions.
@@ -577,6 +597,24 @@ export function createSampleSapSystem(options: SampleSapSystemOptions = {}): Fak
           // real SAP stays on the logon screen and reports the error in the status bar (type E)
           'wnd[0]/sbar': { type: 'GuiStatusbar', props: { messageType: 'E' } },
         },
+        onVKey: (vKey, ctx) => tryLogon(vKey, ctx),
+      },
+      {
+        name: 'logonLocked',
+        context: { transaction: '', program: 'SAPMSYST', screen: '0100' },
+        status: `User ${user} is locked. Contact your system administrator`,
+        elements: {
+          'wnd[0]': { type: 'GuiMainWindow' },
+          'wnd[0]/usr/txtRSYST-MANDT': { type: 'GuiTextField', props: { leftLabel: 'Client' } },
+          'wnd[0]/usr/txtRSYST-BNAME': { type: 'GuiTextField', props: { leftLabel: 'User' } },
+          'wnd[0]/usr/pwdRSYST-BCODE': {
+            type: 'GuiPasswordField',
+            props: { leftLabel: 'Password' },
+          },
+          'wnd[0]/usr/txtRSYST-LANGU': { type: 'GuiTextField', props: { leftLabel: 'Language' } },
+          'wnd[0]/sbar': { type: 'GuiStatusbar', props: { messageType: 'E' } },
+        },
+        onVKey: (vKey, ctx) => tryLogon(vKey, ctx),
       },
       {
         name: 'easyAccess',

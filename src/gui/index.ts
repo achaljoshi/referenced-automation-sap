@@ -5,7 +5,21 @@ export { ProcessTransport, type ProcessTransportOptions } from './processTranspo
 export { sapGuiTest, type SapGuiOptions } from './fixtures';
 export { FakeSapGui, createSampleSapSystem, type FakeElementSpec, type FakeScreen, type FakeSapGuiOptions, type SampleSapSystemOptions, type SampleSapState } from './fakeSapGui';
 export { logon, ensureLoggedIn, isOnLogonScreen, type SapCredentials } from './logon';
+export {
+  SapLogonCooldownError,
+  activeLogonCooldown,
+  clearLogonFailure,
+  isLockRisk,
+  logonCooldownMinutes,
+  logonMarkerPath,
+  readLogonFailure,
+  writeLogonFailure,
+  DEFAULT_LOGON_COOLDOWN_MIN,
+  DEFAULT_LOGON_MARKER_DIR,
+  type LogonFailureMarker,
+} from './logonGuard';
 export { dumpScreen, formatScreenDump, type ScreenNode } from './inspect';
+export { describeScreen, closeness, editDistance } from './screenHints';
 export { BRIDGE_SCRIPT } from './bridgeScript';
 export { parseMemberPath, formatLink, type MemberPath } from './memberPath';
 export { SapLocator } from './locator';

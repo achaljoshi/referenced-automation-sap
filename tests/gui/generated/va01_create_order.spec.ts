@@ -18,6 +18,7 @@ function field(row: Record<string, string>, column: string): string {
  * Review before committing:
  *  - reads SAP_CLIENT, SAP_USER, SAP_PASSWORD, SAP_LANGUAGE from the environment (.env.<name> / CI variables); none of those values is stored here
  *  - every typed value (CONSTANTS) and every id (LOCATORS) is at the top of ./pages/Va01CreateOrderPages.ts: change them there; the page and property names are mechanical - rename them
+ *  - session: sap (the recording contains the logon): the test starts on whatever the connection shows - the logon screen with SAP_GUI_MODE=open; in attach mode be on the logon screen too
  *  - no waits are needed: every step waits for SAP to be idle and for its control to exist
  *  - one test runs per row of va01_create_order.data.csv; the first row holds the values that were recorded
  *  - line 18: the recorded value for "wnd[0]/usr/pwdRSYST-BCODE" was replaced with env SAP_PASSWORD - it is not in the generated files

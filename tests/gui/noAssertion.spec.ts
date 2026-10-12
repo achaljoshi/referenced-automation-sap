@@ -14,7 +14,7 @@ const cli = path.join(root, 'dist/cli/convertVbs.js');
 const recording = path.join(root, 'examples/va01_create_order.vbs');
 const vbs = 'session.findById("wnd[0]/usr/txtA").text = "x"\nsession.findById("wnd[0]").sendVKey 0';
 const options = { testName: 'recorded: demo', sourceName: 'demo.vbs' };
-const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor as new (...args: string[]) => () => Promise<void>;
+const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor as new (...args: string[]) => (...values: unknown[]) => Promise<void>;
 
 test.describe('a converted test without an assertion', () => {
   test('says so in the header and at the end, and ends with a guard that fails', () => {
@@ -26,7 +26,7 @@ test.describe('a converted test without an assertion', () => {
   });
 
   test('the guard really fails when the generated lines run (negative control for the converted example passing silently)', async () => {
-    await expect(new AsyncFunction(assertionLines({}).join('\n'))()).rejects.toThrow(/add an assertion/);
+    await expect(new AsyncFunction('expect', assertionLines({}).join('\n'))(expect)).rejects.toThrow(/add an assertion/);
   });
 
   test('page-object mode does the same', () => {
@@ -43,11 +43,25 @@ test.describe('a converted test without an assertion', () => {
     expect(code).not.toContain('throw new Error');
   });
 
+  test('the SAP-aware expect is imported even without an assertion, and kept "used" so the import is never reported as unused', async () => {
+    for (const noAssertion of ['fail', 'todo'] as const) {
+      const flat = convertVbs(vbs, { ...options, noAssertion }).code;
+      const pages = convertToPageObjects(vbs, { ...options, baseName: 'demo', noAssertion }).spec;
+      for (const code of [flat, pages]) {
+        expect(code).toContain("import { sapExpect as expect } from '@automation/referenced-automation-sap';");
+        expect(code).toContain('void expect;');
+      }
+    }
+    // the placeholder line really references expect: without the import it would be a ReferenceError, with it nothing happens
+    await new AsyncFunction('expect', assertionLines({ noAssertion: 'todo' }).join('\n'))(expect);
+    await expect(new AsyncFunction(assertionLines({ noAssertion: 'todo' }).join('\n'))()).rejects.toThrow(/expect is not defined/);
+  });
+
   test('expectStatus writes the assertion instead: no TODO, no guard, the matcher imported', () => {
     const { code } = convertVbs(vbs, { ...options, expectStatus: 'has been saved' });
     expect(code).toContain('await expect(sap).toHaveStatusMessage(/has been saved/i);');
     expect(code).toContain("import { sapExpect as expect } from '@automation/referenced-automation-sap';");
-    expect(code).not.toMatch(/TODO\(converter\)|NO ASSERTION|throw new Error/);
+    expect(code).not.toMatch(/TODO\(converter\)|NO ASSERTION|throw new Error|void expect/);
     expect(() => convertVbs(vbs, { ...options, expectStatus: '(' })).toThrow(SyntaxError); // a bad pattern fails at conversion time
   });
 
@@ -77,6 +91,7 @@ test.describe('the converter CLI: --strict by default in the npm scripts', () =>
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sapassert-'));
     const plain = execFileSync('node', [cli, recording, '--out', dir], { encoding: 'utf8' });
     expect(plain).toContain('no assertion: the test fails until you add one');
+    expect(plain).toContain('--expect-text, --expect-title or --expect-status');
     expect(fs.readFileSync(path.join(dir, 'va01_create_order.spec.ts'), 'utf8')).toContain('throw new Error');
 
     execFileSync('node', [cli, recording, '--out', dir, '--allow-no-assertion']);
@@ -88,7 +103,7 @@ test.describe('the converter CLI: --strict by default in the npm scripts', () =>
   });
 
   test('the committed generated examples carry a real assertion (they run in the suite and must be able to fail)', () => {
-    for (const file of ['tests/gui/va01_create_order.spec.ts', 'tests/gui/generated/va01_create_order.spec.ts']) {
+    for (const file of ['tests/gui/va01_create_order.spec.ts', 'tests/gui/generated/va01_create_order.spec.ts', 'tests/gui/va01_logged_on.spec.ts']) {
       const text = fs.readFileSync(path.join(root, file), 'utf8');
       expect(text, file).toContain('toHaveStatusMessage(/has been saved/i)');
       expect(text, file).not.toContain('TODO(converter)');

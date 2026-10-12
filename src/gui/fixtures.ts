@@ -4,6 +4,7 @@ import { test as uiTest } from '@automation/referenced-automation-ui';
 import { getLogger, loadEnv } from '@automation/referenced-automation-utils';
 import { appendCreated, DEFAULT_DATA_DIR, formatCreated, SapDataRegistry, type CreatedObject } from './data';
 import { createSampleSapSystem } from './fakeSapGui';
+import { ensureLoggedIn } from './logon';
 import { selectedTransport, startRealTransport } from './transportFactory';
 import { appendInsight, DEFAULT_INSIGHTS_DIR } from '../insights';
 import { SapUserPool, type UserLease } from './pool';
@@ -253,6 +254,14 @@ export class SapConnection {
  * evidence and pop-up handlers start empty. On failure the report gets the
  * step journal, the status bar text and a screenshot.
  *
+ * Two fixtures give a test its session:
+ *   sap          the session as the connection leaves it: with SAP_GUI_MODE=open the LOGON SCREEN (use it for a recording that
+ *                contains the logon), with attach mode whatever you have open
+ *   loggedInSap  the same session, logged on first when SAP shows the logon screen (SAP_USER / SAP_PASSWORD / SAP_CLIENT /
+ *                SAP_LANGUAGE) and left alone when it is already logged on (use it for a recording made inside SAP, and for
+ *                hand-written tests). A wrong password stops the run with what to check and arms the logon cooldown
+ *                (SAP_LOGON_FAILURE_COOLDOWN_MIN) so a retry cannot lock the user.
+ *
  * Configuration (all optional, from .env.<name> or the environment):
  *   SAP_GUI_MODE              attach | open                     (default attach)
  *   SAP_GUI_CONNECTION_NAME   SAP Logon entry to open, for mode=open
@@ -273,7 +282,7 @@ export class SapConnection {
  * in the report - never silently passed.
  */
 export const sapGuiTest = uiTest.extend<
-  { sap: SapGuiSession; sapData: SapDataRegistry; sapScenario: Map<string, string> },
+  { sap: SapGuiSession; loggedInSap: SapGuiSession; sapData: SapDataRegistry; sapScenario: Map<string, string> },
   SapGuiOptions & { sapConnection: SapConnection }
 >({
   sapGuiMode: [undefined, { option: true, scope: 'worker' }],
@@ -316,6 +325,12 @@ export const sapGuiTest = uiTest.extend<
       if (sapConnection.insights) recordInsight(session, testInfo, sapConnection.insightsDir);
       if (sapConnection.reuse === 'test') await sapConnection.dispose();
     }
+  },
+
+  /** `sap`, logged on first if SAP shows the logon screen; an already logged-on session is left alone. See `ensureLoggedIn`. */
+  loggedInSap: async ({ sap }, use) => {
+    await ensureLoggedIn(sap);
+    await use(sap);
   },
 
   /** Values remembered between the steps of one scenario (used by the BDD steps: "I remember the number ... as ..."). Fresh for every test. */
