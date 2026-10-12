@@ -200,6 +200,8 @@ Put the ids in a page object (`tests/sapgui/pages/`) once you have more than a c
 
 ### Convert a recording
 
+The recording can be saved in any encoding the Record and Playback dialog offers (UTF-16 "Unicode", UTF-8 or ANSI); the converter detects it.
+
 ```bash
 npm run build
 cp ~/Documents/SAP/SAP\ GUI/my_recording.vbs recordings/

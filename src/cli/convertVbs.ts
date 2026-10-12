@@ -2,7 +2,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { csvUtils } from '@automation/referenced-automation-utils';
-import { convertToPageObjects, convertVbs, type ParamRule } from '../vbs';
+import { convertToPageObjects, convertVbs, decodeRecording, type ParamRule } from '../vbs';
 
 const USAGE = `sap-vbs-to-playwright - turn SAP GUI Scripting recordings (.vbs) into Playwright tests
 
@@ -137,7 +137,7 @@ function main(): void {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     let result: { warnings: Array<{ line: number; message: string; severity?: 'todo' | 'info' }>; envVars: string[] };
     if (opts.pageObjects) {
-      const generated = convertToPageObjects(fs.readFileSync(file, 'utf8'), {
+      const generated = convertToPageObjects(decodeRecording(fs.readFileSync(file)), {
         ...common,
         baseName: name,
         sapImport: opts.sapImport,
@@ -160,7 +160,7 @@ function main(): void {
       }
       result = generated;
     } else {
-      const flat = convertVbs(fs.readFileSync(file, 'utf8'), common);
+      const flat = convertVbs(decodeRecording(fs.readFileSync(file)), common);
       fs.writeFileSync(outPath, flat.code);
       process.stdout.write(`${file}  ->  ${outPath}\n`);
       result = flat;
