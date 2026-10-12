@@ -23,7 +23,7 @@ For testers and developers who need to automate the classic SAP GUI (the Windows
 ```
 
 - **SAP GUI Scripting** is SAP's own automation interface, built into SAP GUI. It addresses every control by a technical id such as `wnd[0]/usr/txtRSYST-BNAME`. The old Java framework drove it through JACOB; this one drives it through PowerShell.
-- **The bridge** (`src/gui/bridgeScript.ts`) is a short PowerShell script that does exactly what a recorded VBScript does: find a control by id, read/write a property, call a method. `npx sap-gui-doctor --print-bridge` prints it, for anyone who has to approve a script before it runs on a managed desktop. It makes no network calls and installs nothing; the one program it can start is SAP Logon, from a path you configure.
+- **The bridge** (`src/gui/bridgeScript.ts`) is a short PowerShell script that does exactly what a recorded VBScript does: find a control by id, read/write a property, call a method. `npm run doctor -- --print-bridge` prints it, for anyone who has to approve a script before it runs on a managed desktop. It makes no network calls and installs nothing; the one program it can start is SAP Logon, from a path you configure.
 - **`SapGuiSession`** is what your tests use (`sap.setText`, `sap.press`, ...). It adds what a raw recording lacks: it waits for SAP to be idle and for the control to exist before every step, so there are no sleeps.
 - **Playwright** is only the test runner: reporting, retries, filtering by tag, `expect`.
 
@@ -73,7 +73,7 @@ Settings come from `.env.<name>` (committed, **no secrets**), overridden by `.en
 | `SAP_MULTIPLE_LOGON` | `continue` or `fail` when SAP says the user is already logged on | `continue` |
 | `SAP_GUI_LOGON_PATH` | `saplogon.exe`, started in `open` mode if SAP Logon isn't running | `C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe` |
 | `SAP_GUI_POWERSHELL` | path to `powershell.exe`; a 32-bit SAP GUI needs `C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe` | `powershell.exe` |
-| `SAP_GUI_POWERSHELL_SCRIPT_DIR` | folder with an approved (typically signed) `sap-gui-bridge.ps1` (`npx sap-gui-doctor --print-bridge \| Out-File -Encoding ascii sap-gui-bridge.ps1`, then sign it): it is run as it is and `-ExecutionPolicy Bypass` is NOT passed. A copy that differs from this version's script is refused. Without it the bridge runs from a temp file with `-ExecutionPolicy Bypass` for that one process | |
+| `SAP_GUI_POWERSHELL_SCRIPT_DIR` | folder with an approved (typically signed) `sap-gui-bridge.ps1` (`npm run doctor -- --print-bridge \| Out-File -Encoding ascii sap-gui-bridge.ps1`, then sign it): it is run as it is and `-ExecutionPolicy Bypass` is NOT passed. A copy that differs from this version's script is refused. Without it the bridge runs from a temp file with `-ExecutionPolicy Bypass` for that one process | |
 | `SAP_GUI_SIMULATOR` | `true` = use the built-in fake SAP (any OS) | `false` |
 | `SAP_SAMPLE_TCODE` | transaction used by sample test 02 | `SU3` |
 | `SAP_RUN_TEMPLATES` | `true` = run the `...TEMPLATE` tests against real SAP | `false` |
@@ -176,7 +176,7 @@ await sap.table('wnd[0]/usr/tblSAPMV45ATCTRL_U_ERF_AUFTRAG').cell('txtRV45A-KWME
 
 ### Credentials
 
-The password is looked up as `SAP_PASSWORD` in this order: real environment variable (CI: use a masked variable) -> `.env.<name>.local` -> a Windows-DPAPI-protected file. Create the last with `npx sap-gui-secret set SAP_PASSWORD` (prompts, hidden): it can be opened only by the same Windows user on the same machine. Nothing stores a key beside a password. See `ARCHITECTURE.md` decision 10.
+The password is looked up as `SAP_PASSWORD` in this order: real environment variable (CI: use a masked variable) -> `.env.<name>.local` -> a Windows-DPAPI-protected file. Create the last with `npm run secret -- set SAP_PASSWORD` (prompts, hidden): it can be opened only by the same Windows user on the same machine. Nothing stores a key beside a password. See `ARCHITECTURE.md` decision 10.
 
 ### Finding ids
 
@@ -191,9 +191,9 @@ Each of these is opt-in and tested against the simulator; none has been run agai
 The session reads SAP's own session info after every screen change, so every journal line, failure and report says **which transaction, program and screen** SAP was on (`system FAKE, client 100 ... transaction VA01, screen 4001, program SAPMV45A`). Each test also appends its steps to `test-results/sap-insights/`; then:
 
 ```bash
-npx sap-gui-insights report --expected VA01,VA02,FB60   # transactions covered (and the expected ones nobody touched), slowest steps, SAP's own response times
-npx sap-gui-insights baseline                            # save this run's step timings from a known-good run
-npx sap-gui-insights check --baseline sap-baseline.json  # exit 1 if a step kind got clearly slower
+node dist/cli/insights.js report --expected VA01,VA02,FB60   # transactions covered (and the expected ones nobody touched), slowest steps, SAP's own response times
+node dist/cli/insights.js baseline                            # save this run's step timings from a known-good run
+node dist/cli/insights.js check --baseline sap-baseline.json  # exit 1 if a step kind got clearly slower
 ```
 The comparison is deliberately conservative (a change must be large in percent **and** milliseconds, with enough samples), so it tells you where to look; it is not a load test. `SAP_GUI_INSIGHTS=off` disables recording.
 
@@ -208,8 +208,8 @@ If the id is gone but the label is there, the test continues **and the drift is 
 await expect(sap).toMatchScreenContract('va01-overview');   // compares with contracts/va01-overview.contract.json
 ```
 ```bash
-npx sap-gui-contracts capture va01-overview   # on the right screen, once; review and COMMIT the file
-npx sap-gui-contracts diff old.json new.json  # no SAP needed
+npm run contracts -- capture va01-overview   # on the right screen, once; review and COMMIT the file
+npm run contracts -- diff old.json new.json  # no SAP needed
 ```
 A contract records the ids, types and fixed captions of a screen - never field values; table-cell positions are ignored. A control that disappeared or changed type fails, with where it probably moved; additions and caption changes pass unless `strict`. Update a baseline on purpose with `SAP_GUI_UPDATE_CONTRACTS=true` - on a workstation: when `CI` is set the update is **refused** (it would accept whatever screen SAP shows as the new baseline).
 
@@ -218,7 +218,7 @@ A contract records the ids, types and fixed captions of a screen - never field v
 const orderNo = await sapData.captureFromStatusBar('SalesOrder', /Order (\d+) has been saved/, { cleanup: (s) => cancelOrder(s, orderNo) });
 const customer = sapData.unique('CUST');   // time + counter + worker index + random: never collides with an earlier attempt or another worker
 ```
-Cleanups run after the test - pass or fail, after every retry, newest first, one at a time on the session: a cleanup that runs out of time gets an abort signal (`(sap, { signal }) => ...`) and is awaited for a short grace period before the next one starts; if it never stops, the remaining cleanups are not attempted and are reported as failed. **A cleanup that fails, or an object recorded without one, fails the test** (and is a test annotation `sap-cleanup-failed`) - set `SAP_GUI_CLEANUP_FAILURE=warn` to only record it. `npx sap-gui-data orphans` lists whatever could not be cleaned (exit 1); `sap-gui-data list --fail-on-orphans` does the same for the full list, `--require-data` exits 2 when no data directory exists (the SAP tests did not run), and a damaged list is exit 2 - so the command can gate a pipeline. `SAP_GUI_CLEANUP=off` keeps everything for inspection (those objects show as orphans).
+Cleanups run after the test - pass or fail, after every retry, newest first, one at a time on the session: a cleanup that runs out of time gets an abort signal (`(sap, { signal }) => ...`) and is awaited for a short grace period before the next one starts; if it never stops, the remaining cleanups are not attempted and are reported as failed. **A cleanup that fails, or an object recorded without one, fails the test** (and is a test annotation `sap-cleanup-failed`) - set `SAP_GUI_CLEANUP_FAILURE=warn` to only record it. `npm run data -- orphans` lists whatever could not be cleaned (exit 1); `sap-gui-data list --fail-on-orphans` does the same for the full list, `--require-data` exits 2 when no data directory exists (the SAP tests did not run), and a damaged list is exit 2 - so the command can gate a pipeline. `SAP_GUI_CLEANUP=off` keeps everything for inspection (those objects show as orphans).
 
 ### Run workers in parallel without "already logged on"
 `SAP_USER_POOL=U1,U2,U3` (with `SAP_GUI_MODE=open`): each worker leases a distinct user (exclusive across processes on one machine, with a heartbeat and recovery from crashed runs) and `logon()` uses its own `SAP_PASSWORD_<USER>` or the shared `SAP_PASSWORD`. A file lock cannot coordinate several CI machines using the same users; give each machine its own users.
@@ -357,11 +357,11 @@ Another order type: change `inputs.vbakAuart`. A screen was customised and the i
 | bridge does not start / script blocked | PowerShell execution policy on the machine | `SAP_GUI_POWERSHELL`, or ask IT to allow the printed bridge script (`--print-bridge`) |
 | attaches but every step fails with COM errors | 32-bit SAP GUI with 64-bit PowerShell | set `SAP_GUI_POWERSHELL` to the SysWOW64 `powershell.exe` |
 | a pop-up asks "a script is trying to attach..." and the run hangs | notify options still ticked | section 3, step 1 |
-| `SAP_USER and SAP_PASSWORD must both be set` | credentials not configured | put them in `.env.<name>.local`, export them, or `npx sap-gui-secret set SAP_PASSWORD` |
+| `SAP_USER and SAP_PASSWORD must both be set` | credentials not configured | put them in `.env.<name>.local`, export them, or `npm run secret -- set SAP_PASSWORD` |
 | `... is ambiguous: N controls match (...)` | a label/text/tooltip locator matches several controls | narrow it (`type`, `exact`, a more specific label) or `.first()` on purpose |
 | `no control matched label "..."` | wrong label/language, or the screen is not the one you think | `npm run doctor -- --dump`; labels follow the SAP logon language |
 | steps fail because a pop-up is in front | an unexpected modal window | `sap.onPopup(...)` once; see the `sap-steps` attachment to find which step first failed |
-| `could not unprotect ... .dpapi` | the secret file was made by another Windows user or on another machine | run `npx sap-gui-secret set SAP_PASSWORD` as the user that runs the tests |
+| `could not unprotect ... .dpapi` | the secret file was made by another Windows user or on another machine | run `npm run secret -- set SAP_PASSWORD` as the user that runs the tests |
 | `still on the logon screen ... Status bar: "Name or password is incorrect"` | wrong credentials/client | fix them; watch for locking the user after repeated failures |
 | `SAP showed a pop-up after logon` | already logged on elsewhere, or password expired | `npm run doctor -- --dump "wnd[1]"` while it shows; handle it in your base test |
 | `"wnd[0]/usr/..." not found after 30000ms. Nearest id that does exist ...` | wrong id, or the flow took a different path (an unexpected pop-up or screen) | read the "contains:" list and the status bar text in the message; `--dump` the screen; re-record |

@@ -200,6 +200,8 @@ Put the ids in a page object (`tests/sapgui/pages/`) once you have more than a c
 
 ### Convert a recording
 
+> **Inside this repo, run the tools as `node dist/cli/<name>.js` or through the npm scripts** (`npm run convert`, `npm run doctor`, `npm run secret`, `npm run insights`, `npm run data`, `npm run contracts`; pass arguments after `--`). The `npx sap-vbs-to-playwright` / `npx sap-gui-...` names are installed into a project that *depends on* this package, not into this repo itself, so `npx` finds nothing here ("is not recognized as an internal or external command").
+
 The recording can be saved in any encoding the Record and Playback dialog offers (UTF-16 "Unicode", UTF-8 or ANSI); the converter detects it.
 
 ```bash
@@ -207,7 +209,7 @@ npm run build
 cp ~/Documents/SAP/SAP\ GUI/my_recording.vbs recordings/
 npm run convert                                   # recordings/*.vbs -> tests/sapgui/*.spec.ts (already runs with --strict)
 # or one file, with options:
-npx sap-vbs-to-playwright recordings/my_recording.vbs --out tests/sapgui --strict --expect-status "has been saved"
+node dist/cli/convertVbs.js recordings/my_recording.vbs --out tests/sapgui --test-import ./support/sapTest --strict --expect-status "has been saved"
 ```
 
 **A converted test has no assertion** - a recording only performs actions, so left alone it would pass whenever SAP does not throw. Unless you give it one with `--expect-status <regex>` (the status bar must match at the end), the file says so in its header, ends with a `// TODO(converter): no assertion` and a guard that **fails the test** until you replace it with a check of the business result (`--allow-no-assertion` leaves the guard out, for spikes). `npm run convert`, `convert:pages` and `convert:data` pass `--strict`, which exits 1 when something could not be converted (control flow, unsupported lines); the note that a password was replaced by an environment read does not count against it.
@@ -270,7 +272,7 @@ SAP GUI Scripting is a Windows COM API: **tests that drive real SAP must run on 
 1. SAP GUI > Options > Accessibility & Scripting > Scripting: tick **Enable scripting**; **untick** "Notify when a script attaches to running GUI" and "Notify when a script opens a connection" (those pop-ups block an unattended run).
 2. The SAP server must allow it: profile parameter `sapgui/user_scripting = TRUE` (your SAP Basis team).
 3. Open SAP Logon and log on to the system (the default mode *attaches* to what is already open - it never creates or closes anyone's session). To have the test open the connection and start at the logon screen instead: `SAP_GUI_MODE=open` and `SAP_GUI_CONNECTION_NAME="<SAP Logon entry>"`.
-4. Check the machine: `npm run build && npm run doctor`. It tells you which of the above is wrong. `npx sap-gui-doctor --print-bridge` prints the exact PowerShell the framework runs, for whoever must approve it on a managed desktop (it only does what a recorded script does; no network, no installs, no registry or file changes).
+4. Check the machine: `npm run build && npm run doctor`. It tells you which of the above is wrong. `npm run doctor -- --print-bridge` prints the exact PowerShell the framework runs, for whoever must approve it on a managed desktop (it only does what a recorded script does; no network, no installs, no registry or file changes).
 5. `npm run test:sapgui`
 
 | Variable | Meaning | Default |
@@ -298,7 +300,7 @@ When SAP GUI is installed only on a remote Windows desktop host that you reach b
 `FakeSapGui` / `createSampleSapSystem()` is an in-memory SAP with a logon -> VA01 -> save flow. `tests/gui/sapFakeTest.ts` wires it into a `test`, so a conversion can be executed on any machine:
 
 ```bash
-npx sap-vbs-to-playwright examples/va01_create_order.vbs --out tests/gui --test-import ./sapFakeTest --expect-status "has been saved" --expect-import ../../src
+node dist/cli/convertVbs.js examples/va01_create_order.vbs --out tests/gui --test-import ./sapFakeTest --expect-status "has been saved" --expect-import ../../src
 npm run test:framework
 ```
 

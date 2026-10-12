@@ -40,6 +40,8 @@
     "test:framework": "bddgen && playwright test tests/gui --workers=50% && node scripts/min-executed.js --min 200",
     "test:sapgui": "playwright test tests/sapgui --grep @sapgui",
     "doctor": "node dist/cli/doctor.js",
+    "data": "node dist/cli/data.js",
+    "secret": "node dist/cli/secret.js",
     "try:simulator": "node scripts/try-simulator.js",
     "insights": "node dist/cli/insights.js report",
     "contracts": "node dist/cli/contracts.js",
