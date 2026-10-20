@@ -47,6 +47,7 @@
 - Docs: `docs/ARCHITECTURE.md`, `docs/SAP_GUI_GUIDE.md`, `docs/MIGRATION_FROM_JAVA.md`.
 
 ### Changed
+- **tsconfig works with TypeScript 7**: `"module": "node16"` and `"moduleResolution": "node16"` replace `commonjs` / `node` (TypeScript 7 removed `moduleResolution: node` and stops with TS5108). The compiled JavaScript is identical; checked with TypeScript 5.9.3 and 7.0.2. The fortnightly audit flags the old setting (`tsconfig-removed-option`).
 - **`@automation/*` dependencies are version ranges (`^1.0.0`)**, installed from the registry in `NPM_REGISTRY_URL` (`setup` runs `npm config set registry` first); `setup.sh --local` installs locally built tarballs instead; `scripts/publish-package.sh|.bat` publishes this package. README: publishing, upgrading, local generation.
 - **Playwright 1.64.0** (was 1.62.1): the `@playwright/test` / `playwright-core` floor is `^1.64.0` and the peer range is `>=1.64.0 <2.0.0` where the package declares one; run `npx playwright install chromium` after upgrading.
 - Fiori `waitForUI5Ready` uses no fixed waits; shared Playwright config; lint rules (no hard waits; a warning for raw ids in specs).
