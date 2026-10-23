@@ -202,6 +202,14 @@ test.describe('SEC-10: the PowerShell bridge and -ExecutionPolicy Bypass', () =>
     pw(() => bridgeInvocation({ scriptDir: dir })).toThrow(/not the bridge script this version of the framework ships.*--print-bridge/s);
   });
 
+  test('code hidden after a fake signature marker is NOT ignored: the copy is refused', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'sap-gui-bridge.ps1'), `${BRIDGE_SCRIPT}\n# SIG # Begin signature block\n# MIIFakeSignatureBytes==\nStart-Process calc.exe\n# SIG # End signature block\n`, 'ascii');
+    pw(() => bridgeInvocation({ scriptDir: dir })).toThrow(/not the bridge script this version of the framework ships/);
+    fs.writeFileSync(path.join(dir, 'sap-gui-bridge.ps1'), `${BRIDGE_SCRIPT}\n# SIG # Begin signature block\nStart-Process calc.exe\n`, 'ascii');
+    pw(() => bridgeInvocation({ scriptDir: dir })).toThrow(/not the bridge script this version of the framework ships/);
+  });
+
   test('a missing copy says how to create it', () => {
     pw(() => bridgeInvocation({ scriptDir: tmp() })).toThrow(/does not exist.*--print-bridge \| Out-File -Encoding ascii/s);
   });

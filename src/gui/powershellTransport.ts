@@ -23,12 +23,16 @@ export interface PowerShellTransportOptions {
 
 export const APPROVED_SCRIPT_NAME = 'sap-gui-bridge.ps1';
 
-/** What the file holds apart from an Authenticode signature block, with line endings and trailing blanks normalised. */
+/**
+ * What the file holds apart from an Authenticode signature block, with line endings and trailing blanks normalised.
+ * Only a block made of comment lines counts as a signature: code appended after a fake "# SIG # Begin signature block" line is
+ * NOT cut off, so it makes the copy differ from the shipped script and the copy is refused.
+ */
 function withoutSignature(text: string): string {
   return text
     .replace(/^\uFEFF/, '')
     .replace(/\r\n/g, '\n')
-    .replace(/\n# SIG # Begin signature block[\s\S]*$/, '')
+    .replace(/\n# SIG # Begin signature block(?:\n#[^\n]*)*\s*$/, '')
     .trim();
 }
 
