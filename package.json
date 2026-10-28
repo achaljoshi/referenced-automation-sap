@@ -73,7 +73,7 @@
   },
   "dependencies": {
     "@automation/referenced-automation-ui": "^1.0.0",
-    "@automation/referenced-automation-utils": "^1.0.0"
+    "@automation/referenced-automation-utils": "^1.0.1"
   },
   "bin": {
     "sap-vbs-to-playwright": "./dist/cli/convertVbs.js",
