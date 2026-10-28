@@ -83,16 +83,6 @@ test.describe('SapGuiSession waits for SAP so a recording needs no sleeps', () =
     expect(error.message).toContain('"wnd[0]/usr/txtNO-SUCH-FIELD" not found');
   });
 
-  test('a wrong password is a visible outcome, not a hang: the status bar says why', async () => {
-    const fake = createSampleSapSystem({ transitionDelayMs: 20 });
-    const sap = await SapGuiSession.attach(fake, FAST);
-    await sap.setText('wnd[0]/usr/txtRSYST-MANDT', '100');
-    await sap.setText('wnd[0]/usr/txtRSYST-BNAME', 'TESTUSER');
-    await sap.setText('wnd[0]/usr/pwdRSYST-BCODE', 'wrong');
-    await sap.sendVKey(0);
-    expect(await sap.statusBarText()).toContain('incorrect');
-  });
-
   test('the password never reaches the logs', async () => {
     const lines: string[] = [];
     const original = process.stdout.write.bind(process.stdout);

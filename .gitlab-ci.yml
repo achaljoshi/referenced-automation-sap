@@ -46,13 +46,13 @@
 #
 # ---- Live external test excluded from the main pipeline ----
 #
-# tests/fioriCart.spec.ts (@regression) drives a real, live SAP-hosted demo
+# features/fiori-cart.feature (@regression @live) drives a real, live SAP-hosted demo
 # app (ui5.sap.com) - useful locally to prove byControlId/waitForUI5Ready
 # against a real UI5 app, but not something this pipeline can guarantee is
 # reachable on a locked-down corporate network. The main `test` job below
-# only runs test:smoke (tests/fioriPage.spec.ts, a local fixture, no
-# external network needed). A separate `regression` job runs the live-demo
-# test with `allow_failure: true`, so a genuine regression is still visible
+# only runs test:smoke (tests/fioriPage.spec.ts, a local fixture, and the
+# simulator features - no external network needed). A separate `regression` job
+# runs the live-demo scenario with `allow_failure: true`, so a genuine regression is still visible
 # without blocking the pipeline on a network path outside this repo's
 # control.
 #

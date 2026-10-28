@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed (tests)
+- **SAP behaviours are Gherkin scenarios**: the logon behaviours of `tests/gui/logon.spec.ts` (a valid logon, a wrong password, missing credentials, `ensureLoggedIn` on a logged-on session, the password kept out of the message), the visible outcome of a wrong password (`tests/gui/session.spec.ts`), logging off (`tests/gui/behaviour.spec.ts`) and the SAPUI5 shopping cart (`tests/fioriCart.spec.ts`, deleted) are now `features/sap-logon.feature` (`@sapgui @smoke`) and `features/fiori-cart.feature` (`@regression @live`). New steps live in `features/steps/logon.ts` and `features/steps/fiori.ts`; the logon-marker folder and the cart page object are fixtures in `features/steps/fixtures.ts`. The tests of the framework itself stay plain specs (the README says which and why).
+- `npm run test:bdd` leaves out scenarios tagged `@live` (they need the network); `npm run test:regression` runs `bddgen` first, so the `@regression` features are generated before they are selected.
+
 ### Fixed
 - **Approved-script check could be bypassed**: with `SAP_GUI_POWERSHELL_SCRIPT_DIR`, everything after a `# SIG # Begin signature block` line was ignored when comparing the approved copy with the shipped bridge, so code appended after a fake marker was accepted. Only a block of comment lines counts as a signature now; a regression test covers it.
 

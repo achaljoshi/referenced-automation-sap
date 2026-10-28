@@ -85,18 +85,6 @@ test.describe('home(): a known starting point between tests', () => {
     expect(fake.calls).toHaveLength(0);
   });
 
-  test('logoff ends the session (/nex)', async () => {
-    const fake = createSampleSapSystem({ transitionDelayMs: 0 });
-    const sap = await SapGuiSession.attach(fake, FAST);
-    await sap.setText('wnd[0]/usr/txtRSYST-MANDT', '100');
-    await sap.setText('wnd[0]/usr/txtRSYST-BNAME', 'TESTUSER');
-    await sap.setText('wnd[0]/usr/pwdRSYST-BCODE', 'correct-horse');
-    await sap.sendVKey(0);
-    expect(fake.currentScreen).toBe('easyAccess');
-    await sap.logoff();
-    expect(fake.currentScreen).toBe('logon');
-  });
-
   test('healthCheck is false once SAP is gone', async () => {
     const { sap, fake } = await demoSession();
     expect(await sap.healthCheck()).toBe(true);

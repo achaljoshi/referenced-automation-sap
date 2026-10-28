@@ -393,7 +393,7 @@ registerDataSteps({ Given, Then });                   // from the UI package: va
 registerSapSteps({ Given, When, Then });
 ```
 
-Every string in a step understands `{{placeholders}}` (`{{random:alnum(6)}}`, `{{date:+7d}}`, `{{env:X}}`, `{{uuid}}`, a saved value). A value remembered from the status bar is stored as `{{order}}` too, so in a project that also has the UI and API step libraries (see `referenced-automation-ui-api`) the next step can call an API or check a web page with it. `npm run test:bdd` runs only the features. Against a real SAP, delete the `sapGuiTransport` override in `features/steps/fixtures.ts` and set `SAP_GUI_MODE` / the `.env` files as for any other SAP test.
+Every string in a step understands `{{placeholders}}` (`{{random:alnum(6)}}`, `{{date:+7d}}`, `{{env:X}}`, `{{uuid}}`, a saved value). A value remembered from the status bar is stored as `{{order}}` too, so in a project that also has the UI and API step libraries (see `referenced-automation-ui-api`) the next step can call an API or check a web page with it. `npm run test:bdd` runs only the features (not the ones tagged `@live`, which need the network). Steps that only this repo needs - the logon steps (`features/steps/logon.ts`) and the shopping cart steps (`features/steps/fiori.ts`) - live next to the shared ones in `features/steps/`; the README lists which behaviours are scenarios and which plain specs remain. Against a real SAP, delete the `sapGuiTransport` override in `features/steps/fixtures.ts` and set `SAP_GUI_MODE` / the `.env` files as for any other SAP test.
 
 ## 6. Converting recordings
 

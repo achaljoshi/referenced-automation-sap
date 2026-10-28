@@ -1,22 +1,8 @@
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import { expect, test } from '@playwright/test';
-import { createSampleSapSystem, dumpScreen, ensureLoggedIn, formatScreenDump, logon, SapGuiSession } from '../../src';
+import { createSampleSapSystem, dumpScreen, formatScreenDump, logon, SapGuiSession } from '../../src';
 
 const FAST = { timeoutMs: 3_000, pollMs: 10 };
 
-// A wrong password arms the logon cooldown (see logonGuard.ts): keep each test's marker in a folder of its own so that
-// neither another test nor the next run of this suite is refused because of a failure this file provoked on purpose.
-const savedMarkerDir = process.env.SAP_GUI_LOGON_MARKER_DIR;
-test.beforeEach(() => {
-  process.env.SAP_GUI_LOGON_MARKER_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sap-logon-marker-'));
-});
-test.afterEach(() => {
-  fs.rmSync(process.env.SAP_GUI_LOGON_MARKER_DIR ?? '', { recursive: true, force: true });
-  if (savedMarkerDir === undefined) delete process.env.SAP_GUI_LOGON_MARKER_DIR;
-  else process.env.SAP_GUI_LOGON_MARKER_DIR = savedMarkerDir;
-});
 const good = { client: '100', user: 'TESTUSER', password: 'correct-horse', language: 'EN' };
 
 async function fresh() {
@@ -24,38 +10,9 @@ async function fresh() {
   return sap;
 }
 
-test.describe('logon helper', () => {
-  test('logs on and leaves the logon screen', async () => {
-    const sap = await fresh();
-    await logon(sap, good);
-    expect(await sap.exists('wnd[0]/tbar[0]/okcd')).toBe(true);
-    expect(await sap.getText('wnd[0]')).toBe('SAP Easy Access');
-  });
-
-  test('a wrong password fails right there, with the status bar text', async () => {
-    const sap = await fresh();
-    await expect(logon(sap, { ...good, password: 'nope' })).rejects.toThrow(/still on the logon screen.*Name or password is incorrect/);
-  });
-
-  test('missing credentials fail with where to put them, before touching SAP', async () => {
-    const sap = await fresh();
-    await expect(logon(sap, { user: '', password: '' })).rejects.toThrow(/SAP_USER and SAP_PASSWORD must both be set.*\.env\.\w+\.local/);
-    expect(await sap.exists('wnd[0]/usr/pwdRSYST-BCODE')).toBe(true); // still untouched on the logon screen
-  });
-
-  test('ensureLoggedIn logs on from the logon screen and does nothing when already logged on', async () => {
-    const sap = await fresh();
-    await ensureLoggedIn(sap, good);
-    expect(await sap.getText('wnd[0]')).toBe('SAP Easy Access');
-    await ensureLoggedIn(sap, { user: 'ignored', password: 'ignored' }); // would throw if it tried to log on again
-  });
-
-  test('the password is not in the failure message', async () => {
-    const sap = await fresh();
-    const error = (await logon(sap, { ...good, password: 'hunter2-secret' }).catch((e: unknown) => e)) as Error;
-    expect(error.message).not.toContain('hunter2-secret');
-  });
-});
+// The logon helper itself (a valid logon, a wrong or missing password, ensureLoggedIn, the password kept out of the message)
+// is described in features/sap-logon.feature; what stays here are the simulator's multiple-logon pop-up (asserted on the
+// calls it receives) and the screen dump.
 
 test.describe('multiple-logon pop-up (user already logged on elsewhere)', () => {
   const withPopup = () => createSampleSapSystem({ transitionDelayMs: 30, multipleLogon: true });

@@ -38,12 +38,32 @@ npm test
 
 ## Verifying this repo's own tests
 
-`npm run test:smoke` and `npm run test:framework` generate the Gherkin features first (`bddgen`) and end with `scripts/min-executed.js`: the run **fails when fewer tests executed than expected** and prints how many were skipped and why (for example `skipped 8x: needs a JDK` - without a JDK `tests/gui/javaBridge.spec.ts` exercises nothing, and the run would otherwise look green). Parallelism: attach mode drives one SAP window, so `playwright.config.ts` runs one worker there (see [Parallel workers](#parallel-workers)).
+`npm run test:smoke`, `test:framework`, `test:bdd` and `test:regression` generate the Gherkin features first (`bddgen`); the first three end with `scripts/min-executed.js`: the run **fails when fewer tests executed than expected** and prints how many were skipped and why (for example `skipped 8x: needs a JDK` - without a JDK `tests/gui/javaBridge.spec.ts` exercises nothing, and the run would otherwise look green). Parallelism: attach mode drives one SAP window, so `playwright.config.ts` runs one worker there (see [Parallel workers](#parallel-workers)).
 
 Two things are tested, deliberately kept separate:
 
 1. **`tests/fioriPage.spec.ts`** - `byControlId`/`waitForUI5Ready` against a small local fixture (`tests/support/fioriStyleFixture.html`) that mimics UI5's id-prefixing convention. Deterministic, no network dependency, no flake risk.
-2. **`tests/fioriCart.spec.ts`** - a real integration test against SAP's own publicly hosted [Shopping Cart SAPUI5 demo kit app](https://ui5.sap.com/test-resources/sap/m/demokit/cart/webapp/index.html) (credential-free, officially SAP-maintained - not a random third party). Every selector in `tests/support/FioriCartPage.ts` was confirmed against a live render before being written, not guessed from documentation. Its "Promoted Items" panel rotates contents between loads, so the test asserts the shape of the cart total, not one hardcoded value.
+2. **`features/fiori-cart.feature`** (`@regression @live`) - a real integration scenario against SAP's own publicly hosted [Shopping Cart SAPUI5 demo kit app](https://ui5.sap.com/test-resources/sap/m/demokit/cart/webapp/index.html) (credential-free, officially SAP-maintained - not a random third party). Every selector in `tests/support/FioriCartPage.ts` was confirmed against a live render before being written, not guessed from documentation. Its "Promoted Items" panel rotates contents between loads, so the scenario asserts the shape of the cart total, not one hardcoded value. `@live` marks a scenario that needs the network: `npm run test:bdd` leaves it out.
+
+### Where the behaviours live, and which plain specs remain
+
+What a person would recognise as SAP behaviour is written as Gherkin scenarios: `features/*.feature`, with the steps in `features/steps/` and the per-scenario set-up (the simulator, the logon-marker folder, the shopping cart page) in `features/steps/fixtures.ts`. They run in the `bdd` project of `playwright.config.ts`, which is pinned to the built-in simulator; worker rules are the same as everywhere else (the simulator owns one SAP per worker, so `--workers=50%` is fine).
+
+| Feature | Tags | Behaviour |
+|---|---|---|
+| `features/sap-logon.feature` | `@sapgui @smoke` | a valid logon reaches SAP Easy Access; a wrong password is refused with SAP's message and the status bar says why; missing credentials are refused before SAP is touched and say where to put them; the password is not in the failure message; a second request to log on leaves a logged-on session alone; logging off returns to the logon screen |
+| `features/sap-sales-order.feature` | `@sapgui @smoke` | create, read back and clean up sales orders (VA01 / VA02, the status bar) |
+| `features/sap-test-data.feature` | `@sapgui @regression` | unique and remembered test data |
+| `features/fiori-cart.feature` | `@regression @live` | adding an item to the SAPUI5 shopping cart updates the total (network needed) |
+
+The plain specs that remain test the framework itself, not a SAP flow, and stay plain on purpose (a scenario for each would only wrap a library call in a sentence):
+
+- **Drift guards and documentation checks**: `tests/gui/envDocs.spec.ts`, `endToEnd.spec.ts` (the committed generated spec is what the converter produces), `noAssertion.spec.ts`, and the committed generated recordings `tests/gui/va01_*.spec.ts` and `tests/gui/generated/` that those guards compare against.
+- **The converter and recorder**: `generator`, `parser`, `pageobjects`, `converterAssertions`, `converterSecrets`, `recordingEncoding`, `memberPath`.
+- **Library classes and functions against purpose-built fakes** (the assertions are on calls received, timings, journals and error types, which have no business wording): `session`, `locator`, `context`, `fallback`, `screenHints`, `idle`, `behaviour` (pop-up handlers, `home()`, journal, grid/tree/table helpers), `steps` (the step vocabulary itself), `data`, `data-fixture`, `data-cleanup-off`, `data-failure`, `loggedInSap`, `connection`, `reuse-test`, `reuse-worker`, `hardening`, `logonGuard`, `logon` (multiple-logon pop-up, screen dump), `contract`, `insights`, `insights-fixture`, `secrets`, `pool`, `conformance`.
+- **Transport and bridge internals**: `processTransport`, `remoteTransport`, `remoteSelection`, `javaBridge`.
+- **`tests/fioriPage.spec.ts`**: unit tests of `byControlId` and `waitForUI5Ready`.
+- **`tests/sapgui/*.spec.ts`**: the samples you copy for a real SAP (and the target folder of `npm run convert`). The `bdd` project is pinned to the simulator, so they cannot be scenarios without losing that purpose; they run on the simulator with `npm run try:simulator`.
 
 ## Environments
 
